@@ -1,0 +1,14 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+auth:
+  username: admin
+  # 至少 8 位；生产环境务必改掉
+  password: change-me-please
+
+runner:
+  # 单个 bat 最大执行时间（秒）
+  timeoutSeconds: 300
+  # bat 脚本所在目录；留空 = deploy-agent.exe 所在目录
+  scriptDir: ""
