@@ -3,7 +3,9 @@ package apiclient
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -50,9 +52,29 @@ func TestScriptsUsesBasicAuth(t *testing.T) {
 }
 
 func TestRunStreamReadsOutputAndFinal(t *testing.T) {
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:password"))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/run/stream" {
 			t.Fatalf("path = %q, want /run/stream", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != wantAuth {
+			t.Fatalf("Authorization = %q, want %q", r.Header.Get("Authorization"), wantAuth)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll body returned error: %v", err)
+		}
+		var body struct {
+			Script string `json:"script"`
+		}
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Fatalf("request body is not JSON: %v", err)
+		}
+		if body.Script != "a.bat" {
+			t.Fatalf("script = %q, want a.bat", body.Script)
 		}
 		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 		fmt.Fprintln(w, `{"type":"output","script":"a.bat","stream":"stdout","data":"hello\r\n"}`)
@@ -79,6 +101,20 @@ func TestRunStreamReadsOutputAndFinal(t *testing.T) {
 	}
 }
 
+func TestRunStreamAllowsNilEventHandler(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		fmt.Fprintln(w, `{"type":"output","script":"a.bat","stream":"stdout","data":"hello\r\n"}`)
+		fmt.Fprintln(w, `{"type":"final","script":"a.bat","exitCode":0,"timedOut":false}`)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "admin", "password")
+	if err := client.RunStream(context.Background(), "a.bat", nil); err != nil {
+		t.Fatalf("RunStream returned error: %v", err)
+	}
+}
+
 func TestRunStreamMapsHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -96,6 +132,26 @@ func TestRunStreamMapsHTTPError(t *testing.T) {
 		t.Fatalf("error type = %T, want HTTPError", err)
 	}
 	if httpErr.StatusCode != http.StatusNotFound || httpErr.Message != "script not found" {
+		t.Fatalf("HTTPError = %#v", httpErr)
+	}
+}
+
+func TestRunStreamMapsPlainTextHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "admin", "password")
+	err := client.RunStream(context.Background(), "a.bat", func(event StreamEvent) {})
+	if err == nil {
+		t.Fatal("RunStream returned nil error, want HTTPError")
+	}
+	httpErr, ok := err.(HTTPError)
+	if !ok {
+		t.Fatalf("error type = %T, want HTTPError", err)
+	}
+	if httpErr.StatusCode != http.StatusUnauthorized || httpErr.Message != "unauthorized" {
 		t.Fatalf("HTTPError = %#v", httpErr)
 	}
 }

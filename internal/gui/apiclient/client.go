@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -128,7 +129,9 @@ func (c *Client) RunStream(ctx context.Context, script string, onEvent func(Stre
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			return err
 		}
-		onEvent(event)
+		if onEvent != nil {
+			onEvent(event)
+		}
 	}
 	return scanner.Err()
 }
@@ -138,9 +141,19 @@ func (c *Client) setAuth(req *http.Request) {
 }
 
 func decodeHTTPError(resp *http.Response) error {
+	data, _ := io.ReadAll(resp.Body)
 	var body struct {
 		Error string `json:"error"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&body)
-	return HTTPError{StatusCode: resp.StatusCode, Message: body.Error}
+	message := ""
+	if len(data) > 0 && json.Unmarshal(data, &body) == nil {
+		message = body.Error
+	}
+	if message == "" {
+		message = strings.TrimSpace(string(data))
+	}
+	if message == "" {
+		message = http.StatusText(resp.StatusCode)
+	}
+	return HTTPError{StatusCode: resp.StatusCode, Message: message}
 }
