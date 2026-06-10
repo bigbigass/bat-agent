@@ -22,6 +22,28 @@ type testServer struct {
 	reg     *registry.Registry
 }
 
+type flushRecorder struct {
+	header  http.Header
+	flushed bool
+}
+
+func (f *flushRecorder) Header() http.Header {
+	if f.header == nil {
+		f.header = http.Header{}
+	}
+	return f.header
+}
+
+func (f *flushRecorder) Write(b []byte) (int, error) {
+	return len(b), nil
+}
+
+func (f *flushRecorder) WriteHeader(int) {}
+
+func (f *flushRecorder) Flush() {
+	f.flushed = true
+}
+
 func makeServer(t *testing.T, files map[string]string) testServer {
 	t.Helper()
 
@@ -404,6 +426,15 @@ func TestRunStreamNonZeroExitCodeFinalHasNoError(t *testing.T) {
 	}
 	if _, ok := final["error"]; ok {
 		t.Fatalf("non-zero script exit must not include error: %#v", final)
+	}
+}
+
+func TestStatusWriterFlushPassesThrough(t *testing.T) {
+	fw := &flushRecorder{}
+	flush(&statusWriter{ResponseWriter: fw})
+
+	if !fw.flushed {
+		t.Fatal("flush did not call underlying flusher")
 	}
 }
 
