@@ -27,10 +27,30 @@ type Result struct {
 	TimedOut   bool
 }
 
+type Stream string
+
+const (
+	StreamStdout Stream = "stdout"
+	StreamStderr Stream = "stderr"
+)
+
+type OutputChunk struct {
+	Stream Stream
+	Data   string
+}
+
+type OutputFunc func(OutputChunk)
+
 // Run executes the given .bat/.cmd script via cmd.exe and returns captured
 // output. Runs with the parent process's token, so if deploy-agent is
 // elevated the script is elevated too.
 func Run(ctx context.Context, path string, timeout time.Duration) (Result, error) {
+	return RunStream(ctx, path, timeout, nil)
+}
+
+// RunStream executes the given .bat/.cmd script via cmd.exe, captures output,
+// and optionally streams stdout/stderr chunks as they are written.
+func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput OutputFunc) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -39,18 +59,33 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 
 	stdoutBuf := &cappedBuffer{limit: maxOutputBytes}
 	stderrBuf := &cappedBuffer{limit: maxOutputBytes}
-	cmd.Stdout = stdoutBuf
-	cmd.Stderr = stderrBuf
 
-	res := Result{StartedAt: time.Now()}
+	res := Result{ExitCode: -1, StartedAt: time.Now()}
 
-	err := cmd.Start()
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		res.FinishedAt = time.Now()
+		return res, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		res.FinishedAt = time.Now()
 		return res, err
 	}
 
+	err = cmd.Start()
+	if err != nil {
+		res.FinishedAt = time.Now()
+		return res, err
+	}
+
+	outputDone := make(chan error, 2)
+	go captureOutput(stdoutPipe, stdoutBuf, StreamStdout, onOutput, outputDone)
+	go captureOutput(stderrPipe, stderrBuf, StreamStderr, onOutput, outputDone)
+
 	waitErr := cmd.Wait()
+	stdoutErr := <-outputDone
+	stderrErr := <-outputDone
 	res.FinishedAt = time.Now()
 
 	if ctx.Err() == context.DeadlineExceeded {
@@ -65,6 +100,15 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 	res.Stdout = decodeOutput(stdoutBuf.Bytes())
 	res.Stderr = decodeOutput(stderrBuf.Bytes())
 
+	if stdoutErr != nil {
+		return res, stdoutErr
+	}
+	if stderrErr != nil {
+		return res, stderrErr
+	}
+	if res.TimedOut {
+		return res, nil
+	}
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
@@ -75,6 +119,31 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 	}
 	res.ExitCode = 0
 	return res, nil
+}
+
+func captureOutput(r io.Reader, capture *cappedBuffer, stream Stream, onOutput OutputFunc, done chan<- error) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			_, _ = capture.Write(chunk)
+			if onOutput != nil {
+				onOutput(OutputChunk{
+					Stream: stream,
+					Data:   decodeOutput(chunk),
+				})
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				done <- nil
+				return
+			}
+			done <- err
+			return
+		}
+	}
 }
 
 // killTree uses taskkill to terminate the pid and all descendants.
