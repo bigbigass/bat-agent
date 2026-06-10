@@ -93,14 +93,10 @@ func run() error {
 		}()
 	}
 
-	select {
-	case <-ctx.Done():
-		log.Printf("shutdown signal received")
-	case err := <-errCh:
-		if err != nil {
-			return err
-		}
+	if err := waitForShutdown(ctx, errCh); err != nil {
+		return err
 	}
+	log.Printf("shutdown signal received")
 
 	if srv != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -118,6 +114,15 @@ func mqttConfigFromConfig(cfg *config.Config) mqttapi.Config {
 		Password:     cfg.Services.MQTT.Password,
 		CommandTopic: cfg.Services.MQTT.CommandTopic,
 		QoS:          byte(cfg.Services.MQTT.QoS),
+	}
+}
+
+func waitForShutdown(ctx context.Context, errCh <-chan error) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		return err
 	}
 }
 

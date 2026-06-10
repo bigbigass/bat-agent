@@ -31,6 +31,9 @@ func NewClient(cfg Config, exec *executor.Executor) *Client {
 }
 
 func (c *Client) Start(ctx context.Context) error {
+	initialSubscribe := make(chan error, 1)
+	var initialSubscribeOnce sync.Once
+
 	opts := paho.NewClientOptions()
 	opts.AddBroker(c.cfg.Broker)
 	opts.SetClientID(c.cfg.ClientID)
@@ -42,24 +45,47 @@ func (c *Client) Start(ctx context.Context) error {
 		opts.SetPassword(c.cfg.Password)
 	}
 
+	subscribe := func(client paho.Client, handler *Handler) error {
+		token := client.Subscribe(c.cfg.CommandTopic, c.cfg.QoS, func(_ paho.Client, msg paho.Message) {
+			payload := append([]byte(nil), msg.Payload()...)
+			go func() {
+				if err := handler.Handle(ctx, payload); err != nil {
+					log.Printf("mqtt command rejected: %v", err)
+				}
+			}()
+		})
+		token.Wait()
+		if err := token.Error(); err != nil {
+			return fmt.Errorf("subscribe MQTT command topic %q: %w", c.cfg.CommandTopic, err)
+		}
+		return nil
+	}
+
+	opts.SetOnConnectHandler(func(client paho.Client) {
+		pub := NewPahoPublisher(client, c.cfg.QoS)
+		handler := NewHandler(c.exec, pub, c.cfg.QoS)
+		err := subscribe(client, handler)
+		if err != nil {
+			log.Printf("mqtt subscribe failed: %v", err)
+		}
+		initialSubscribeOnce.Do(func() {
+			initialSubscribe <- err
+		})
+	})
+
 	client := paho.NewClient(opts)
 	if token := client.Connect(); token.Wait() && token.Error() != nil {
 		return token.Error()
 	}
-
-	pub := NewPahoPublisher(client, c.cfg.QoS)
-	handler := NewHandler(c.exec, pub, c.cfg.QoS)
-	token := client.Subscribe(c.cfg.CommandTopic, c.cfg.QoS, func(_ paho.Client, msg paho.Message) {
-		payload := append([]byte(nil), msg.Payload()...)
-		go func() {
-			if err := handler.Handle(ctx, payload); err != nil {
-				log.Printf("mqtt command rejected: %v", err)
-			}
-		}()
-	})
-	if token.Wait() && token.Error() != nil {
+	select {
+	case err := <-initialSubscribe:
+		if err != nil {
+			client.Disconnect(250)
+			return err
+		}
+	case <-ctx.Done():
 		client.Disconnect(250)
-		return token.Error()
+		return ctx.Err()
 	}
 
 	log.Printf("mqtt connected to %s and subscribed %s", c.cfg.Broker, c.cfg.CommandTopic)
