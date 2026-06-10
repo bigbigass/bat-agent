@@ -185,14 +185,8 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			startStream()
-			if outputs != nil {
-				for out := range outputs {
-					if err := enc.Encode(out); err != nil {
-						go drainOutputs(outputs)
-						return
-					}
-					flush(w)
-				}
+			if !writeStreamOutputs(w, enc, outputs) {
+				return
 			}
 			_ = enc.Encode(streamFinalFromResult(run.result, run.err))
 			flush(w)
@@ -217,6 +211,20 @@ func drainStream(outputs <-chan streamOutputResponse, done <-chan streamRunResul
 func drainOutputs(outputs <-chan streamOutputResponse) {
 	for range outputs {
 	}
+}
+
+func writeStreamOutputs(w http.ResponseWriter, enc *json.Encoder, outputs <-chan streamOutputResponse) bool {
+	if outputs == nil {
+		return true
+	}
+	for out := range outputs {
+		if err := enc.Encode(out); err != nil {
+			go drainOutputs(outputs)
+			return false
+		}
+		flush(w)
+	}
+	return true
 }
 
 func writePreflightStreamError(w http.ResponseWriter, result executor.Result, err error) bool {

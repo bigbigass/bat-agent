@@ -22,4 +22,11 @@ func TestManagerStartsStopped(t *testing.T) {
 	if m.PID() != 0 {
 		t.Fatalf("PID = %d, want 0", m.PID())
 	}
+	stopped, err := m.Stop()
+	if err != nil {
+		t.Fatalf("Stop returned error: %v", err)
+	}
+	if stopped {
+		t.Fatal("Stop stopped a process, want false")
+	}
 }

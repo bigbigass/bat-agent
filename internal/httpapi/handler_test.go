@@ -46,6 +46,11 @@ func (f *flushRecorder) Flush() {
 
 func makeServer(t *testing.T, files map[string]string) testServer {
 	t.Helper()
+	return makeServerWithTimeout(t, files, 5*time.Second)
+}
+
+func makeServerWithTimeout(t *testing.T, files map[string]string, timeout time.Duration) testServer {
+	t.Helper()
 
 	dir := t.TempDir()
 	for name, body := range files {
@@ -57,7 +62,7 @@ func makeServer(t *testing.T, files map[string]string) testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exec := executor.New(reg, 5*time.Second)
+	exec := executor.New(reg, timeout)
 	api := New(exec)
 	return testServer{
 		handler: api.Routes(func(h http.Handler) http.Handler {
@@ -439,6 +444,24 @@ func TestRunStreamNoOutputStillReturnsFinal(t *testing.T) {
 	}
 }
 
+func TestWriteStreamOutputsReturnsForNilChannel(t *testing.T) {
+	rec := httptest.NewRecorder()
+	done := make(chan bool, 1)
+
+	go func() {
+		done <- writeStreamOutputs(rec, json.NewEncoder(rec), nil)
+	}()
+
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("writeStreamOutputs returned false, want true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("writeStreamOutputs blocked on nil channel")
+	}
+}
+
 func TestRunStreamNonZeroExitCodeFinalHasNoError(t *testing.T) {
 	server := makeServer(t, map[string]string{"fail.bat": "@echo off\r\nexit /b 7\r\n"})
 	rec := httptest.NewRecorder()
@@ -458,6 +481,34 @@ func TestRunStreamNonZeroExitCodeFinalHasNoError(t *testing.T) {
 	}
 	if _, ok := final["error"]; ok {
 		t.Fatalf("non-zero script exit must not include error: %#v", final)
+	}
+}
+
+func TestRunStreamTimeoutReturnsFinalOverHTTP200(t *testing.T) {
+	server := makeServerWithTimeout(t, map[string]string{"slow.bat": "@echo off\r\nping -n 3 127.0.0.1 >nul\r\n"}, 20*time.Millisecond)
+	rec := httptest.NewRecorder()
+
+	server.handler.ServeHTTP(rec, postRunStream("slow.bat"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	messages := decodeNDJSON(t, rec.Body.String())
+	if len(messages) == 0 {
+		t.Fatalf("expected final message, got body=%s", rec.Body.String())
+	}
+	final := messages[len(messages)-1]
+	if rawString(t, final, "type") != "final" {
+		t.Fatalf("final type = %q, want final", rawString(t, final, "type"))
+	}
+	if rawInt(t, final, "exitCode") != -1 {
+		t.Fatalf("exitCode = %d, want -1", rawInt(t, final, "exitCode"))
+	}
+	if !rawBool(t, final, "timedOut") {
+		t.Fatal("timedOut = false, want true")
+	}
+	if rawString(t, final, "error") != "script timed out" {
+		t.Fatalf("error = %q, want script timed out", rawString(t, final, "error"))
 	}
 }
 

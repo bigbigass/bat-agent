@@ -156,7 +156,9 @@ func (s *guiState) connectWithRetry(attempts int, delay time.Duration, status st
 	seq := s.connectSeq
 	s.setStatus(status)
 	client := apiclient.New(s.config.BaseURL, s.config.Username, s.config.Password)
+	s.client = nil
 	s.refreshSeq++
+	s.updateRunButton()
 
 	go func() {
 		var scripts []string
@@ -244,16 +246,20 @@ func (s *guiState) runSelectedScript() {
 				s.handleEvent(event)
 			})
 		})
-		if err != nil {
-			fyne.Do(func() {
-				s.appendOutput("[error] " + err.Error() + "\r\n")
-				s.setStatus("请求失败: " + err.Error())
-				s.addHistory(script + " 请求失败")
-			})
-		}
 		fyne.Do(func() {
+			refreshAfterRun := false
+			if err != nil {
+				status, refresh := runErrorStatus(err)
+				refreshAfterRun = refresh && client == s.client
+				s.appendOutput("[error] " + err.Error() + "\r\n")
+				s.setStatus(status)
+				s.addHistory(script + " 请求失败")
+			}
 			s.running = false
 			s.updateRunButton()
+			if refreshAfterRun {
+				s.refreshScripts()
+			}
 		})
 	}()
 }
@@ -367,20 +373,21 @@ func (s *guiState) stopLocalService() {
 		return
 	}
 	go func() {
-		wasRunning := s.service.Running()
-		err := s.service.Stop()
+		stopped, err := s.service.Stop()
 		fyne.Do(func() {
 			if err != nil {
 				s.setStatus("停止服务失败: " + err.Error())
 				return
 			}
-			if wasRunning {
+			if stopped {
 				s.client = nil
 				s.connectSeq++
 				s.refreshSeq++
 				s.clearScripts()
+				s.setStatus("服务已停止")
+				return
 			}
-			s.setStatus("服务已停止")
+			s.setStatus("未停止：服务不是由 GUI 启动")
 		})
 	}()
 }

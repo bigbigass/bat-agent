@@ -279,6 +279,7 @@ whoami /groups | findstr "S-1-16-12288"
 - 将 `deploy-agent-gui.exe` 与 `deploy-agent.exe` 放在同一目录。
 - GUI 本机模式需要管理员权限；`build.bat` 生成的 GUI 已内嵌 `requireAdministrator` 清单，启动时会弹 UAC。
 - GUI 会启动或停止同目录的 `deploy-agent.exe`，服务进程继承 GUI 的管理员权限。
+- 停止服务只作用于 GUI 本次启动并跟踪的进程，会同时终止该服务进程树；外部启动的服务不会被强制停止。
 - 本机启动成功后，GUI 会自动轮询 `/health`，连接服务并加载脚本列表，无需再手动点击“连接”。
 - 如果服务不是由 GUI 启动，第一版不会强制结束未知进程。
 

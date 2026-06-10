@@ -2,8 +2,10 @@ package localservice
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 )
 
@@ -49,16 +51,24 @@ func (m *Manager) Start(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) Stop() error {
+func (m *Manager) Stop() (bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.cmd == nil || m.cmd.Process == nil {
-		return nil
+		m.mu.Unlock()
+		return false, nil
 	}
-	err := m.cmd.Process.Kill()
+	cmd := m.cmd
+	pid := cmd.Process.Pid
 	m.cmd = nil
-	return err
+	m.mu.Unlock()
+
+	if err := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid)).Run(); err != nil {
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			return true, fmt.Errorf("stop process tree: %w; kill process: %v", err, killErr)
+		}
+		return true, fmt.Errorf("stop process tree: %w", err)
+	}
+	return true, nil
 }
 
 func (m *Manager) Running() bool {
