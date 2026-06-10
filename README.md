@@ -10,7 +10,7 @@
 build.bat
 ```
 
-产物：`deploy-agent.exe`（已内嵌 UAC 清单，双击会弹管理员确认框）和 `deploy-agent-gui.exe`。
+产物：`deploy-agent.exe` 和 `deploy-agent-gui.exe`。二者都内嵌 UAC 清单，双击会弹管理员确认框。
 
 GUI 使用 Fyne 构建，需要启用 CGO，并且 PATH 中有可用的 C 编译器（如 gcc）。
 
@@ -277,13 +277,16 @@ whoami /groups | findstr "S-1-16-12288"
 本机模式：
 
 - 将 `deploy-agent-gui.exe` 与 `deploy-agent.exe` 放在同一目录。
-- GUI 会启动或停止同目录的 `deploy-agent.exe`。
+- GUI 本机模式需要管理员权限；`build.bat` 生成的 GUI 已内嵌 `requireAdministrator` 清单，启动时会弹 UAC。
+- GUI 会启动或停止同目录的 `deploy-agent.exe`，服务进程继承 GUI 的管理员权限。
+- 本机启动成功后，GUI 会自动轮询 `/health`，连接服务并加载脚本列表，无需再手动点击“连接”。
 - 如果服务不是由 GUI 启动，第一版不会强制结束未知进程。
 
 远程模式：
 
 - 填写远程服务地址、HTTP Basic Auth 用户名和密码。
 - GUI 通过 `/scripts` 列出脚本，通过 `/run/stream` 执行脚本并实时显示输出。
+- 远程模式不会启动或停止本机 `deploy-agent.exe`。
 
 GUI 会把服务地址、用户名和密码保存到本地配置文件，默认在用户配置目录下的 `deploy-agent-gui/config.json`。这是便捷存储，不是强安全存储；请保护该文件权限，不要提交或分享它。
 

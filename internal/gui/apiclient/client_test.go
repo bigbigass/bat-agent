@@ -115,6 +115,23 @@ func TestRunStreamAllowsNilEventHandler(t *testing.T) {
 	}
 }
 
+func TestRunStreamErrorsWhenFinalEventMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		fmt.Fprintln(w, `{"type":"output","script":"a.bat","stream":"stdout","data":"hello\r\n"}`)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "admin", "password")
+	err := client.RunStream(context.Background(), "a.bat", func(event StreamEvent) {})
+	if err == nil {
+		t.Fatal("RunStream returned nil error, want truncated stream error")
+	}
+	if !strings.Contains(err.Error(), "final") {
+		t.Fatalf("RunStream error = %q, want mention of missing final event", err.Error())
+	}
+}
+
 func TestRunStreamMapsHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

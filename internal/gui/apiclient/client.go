@@ -120,6 +120,7 @@ func (c *Client) RunStream(ctx context.Context, script string, onEvent func(Stre
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
+	sawFinal := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -129,11 +130,20 @@ func (c *Client) RunStream(ctx context.Context, script string, onEvent func(Stre
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			return err
 		}
+		if event.Type == EventFinal {
+			sawFinal = true
+		}
 		if onEvent != nil {
 			onEvent(event)
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if !sawFinal {
+		return fmt.Errorf("stream ended before final event")
+	}
+	return nil
 }
 
 func (c *Client) setAuth(req *http.Request) {

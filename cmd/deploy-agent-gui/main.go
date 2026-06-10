@@ -31,6 +31,8 @@ type guiState struct {
 
 	scriptSelect *widget.Select
 	runButton    *widget.Button
+	startButton  *widget.Button
+	stopButton   *widget.Button
 
 	connectSeq int
 	refreshSeq int
@@ -69,8 +71,8 @@ func main() {
 func (s *guiState) buildUI() fyne.CanvasObject {
 	mode := widget.NewSelect([]string{guiconfig.ModeLocal, guiconfig.ModeRemote}, func(value string) {
 		s.config.Mode = value
+		s.updateLocalButtons()
 	})
-	mode.SetSelected(s.config.Mode)
 
 	baseURL := widget.NewEntry()
 	baseURL.SetText(s.config.BaseURL)
@@ -98,8 +100,8 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 		}
 		s.setStatus("配置已保存")
 	})
-	startLocal := widget.NewButton("启动服务", s.startLocalService)
-	stopLocal := widget.NewButton("停止服务", s.stopLocalService)
+	s.startButton = widget.NewButton("启动服务", s.startLocalService)
+	s.stopButton = widget.NewButton("停止服务", s.stopLocalService)
 
 	s.scriptSelect = widget.NewSelect([]string{}, func(string) {})
 	refresh := widget.NewButton("刷新脚本", s.refreshScripts)
@@ -129,7 +131,10 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 		widget.NewFormItem("用户名", username),
 		widget.NewFormItem("密码", password),
 	)
-	actions := container.NewHBox(connect, save, startLocal, stopLocal)
+	mode.SetSelected(s.config.Mode)
+	s.updateLocalButtons()
+
+	actions := container.NewHBox(connect, save, s.startButton, s.stopButton)
 	top := container.NewBorder(nil, nil, nil, actions, connectionForm)
 	scripts := container.NewBorder(widget.NewLabel("脚本"), container.NewHBox(refresh, s.runButton), nil, nil, s.scriptSelect)
 	runInfo := container.NewBorder(status, nil, nil, nil, output)
@@ -140,40 +145,45 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 }
 
 func (s *guiState) connect() {
+	s.connectWithRetry(1, 0, "连接中...")
+}
+
+func (s *guiState) connectWithRetry(attempts int, delay time.Duration, status string) {
+	if attempts < 1 {
+		attempts = 1
+	}
 	s.connectSeq++
 	seq := s.connectSeq
-	s.setStatus("连接中...")
+	s.setStatus(status)
 	client := apiclient.New(s.config.BaseURL, s.config.Username, s.config.Password)
-	s.client = nil
 	s.refreshSeq++
-	s.clearScripts()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := client.Health(ctx); err != nil {
-			fyne.Do(func() {
-				if seq != s.connectSeq {
-					return
-				}
-				s.setStatus("连接失败: " + err.Error())
-			})
-			return
-		}
-
-		scripts, err := client.Scripts(ctx)
-		if err != nil {
-			fyne.Do(func() {
-				if seq != s.connectSeq {
-					return
-				}
-				s.setStatus("连接失败: " + err.Error())
-			})
-			return
+		var scripts []string
+		var lastErr error
+		for attempt := 1; attempt <= attempts; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := client.Health(ctx)
+			if err == nil {
+				scripts, err = client.Scripts(ctx)
+			}
+			cancel()
+			if err == nil {
+				lastErr = nil
+				break
+			}
+			lastErr = err
+			if attempt < attempts {
+				time.Sleep(delay)
+			}
 		}
 
 		fyne.Do(func() {
 			if seq != s.connectSeq {
+				return
+			}
+			if lastErr != nil {
+				s.setStatus("连接失败: " + lastErr.Error())
 				return
 			}
 			s.client = client
@@ -298,6 +308,19 @@ func (s *guiState) updateRunButton() {
 	s.runButton.Disable()
 }
 
+func (s *guiState) updateLocalButtons() {
+	if s.startButton == nil || s.stopButton == nil {
+		return
+	}
+	if s.config.Mode == guiconfig.ModeLocal {
+		s.startButton.Enable()
+		s.stopButton.Enable()
+		return
+	}
+	s.startButton.Disable()
+	s.stopButton.Disable()
+}
+
 func (s *guiState) handleEvent(event apiclient.StreamEvent) {
 	switch event.Type {
 	case apiclient.EventOutput:
@@ -333,18 +356,29 @@ func (s *guiState) startLocalService() {
 				s.setStatus("启动服务失败: " + err.Error())
 				return
 			}
-			s.setStatus(fmt.Sprintf("服务已启动 PID=%d", s.service.PID()))
+			s.connectWithRetry(20, 500*time.Millisecond, fmt.Sprintf("服务已启动 PID=%d，连接中...", s.service.PID()))
 		})
 	}()
 }
 
 func (s *guiState) stopLocalService() {
+	if s.config.Mode != guiconfig.ModeLocal {
+		s.setStatus("远程模式不管理本机服务")
+		return
+	}
 	go func() {
+		wasRunning := s.service.Running()
 		err := s.service.Stop()
 		fyne.Do(func() {
 			if err != nil {
 				s.setStatus("停止服务失败: " + err.Error())
 				return
+			}
+			if wasRunning {
+				s.client = nil
+				s.connectSeq++
+				s.refreshSeq++
+				s.clearScripts()
 			}
 			s.setStatus("服务已停止")
 		})
@@ -357,7 +391,7 @@ func (s *guiState) setStatus(value string) {
 
 func (s *guiState) appendOutput(value string) {
 	current, _ := s.outputText.Get()
-	_ = s.outputText.Set(current + value)
+	_ = s.outputText.Set(capOutput(current + value))
 }
 
 func (s *guiState) addHistory(value string) {

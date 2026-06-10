@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-REM Build deploy-agent.exe with UAC-elevating manifest embedded.
+REM Build deploy-agent.exe and deploy-agent-gui.exe with UAC-elevating manifests embedded.
 
 set "RSRC=rsrc"
 
@@ -27,13 +27,16 @@ if not exist "%RSRC%" (
 )
 
 :have_rsrc
-echo Embedding manifest...
+echo Embedding deploy-agent manifest...
 "%RSRC%" -manifest deploy-agent.manifest -o resource.syso || goto :error
 
 echo Building deploy-agent.exe...
 set GOOS=windows
 set CGO_ENABLED=0
 go build -ldflags "-s -w" -o deploy-agent.exe . || goto :error
+
+echo Embedding deploy-agent-gui manifest...
+"%RSRC%" -manifest deploy-agent.manifest -o cmd\deploy-agent-gui\resource.syso || goto :error
 
 echo Building deploy-agent-gui.exe...
 set CGO_ENABLED=1
