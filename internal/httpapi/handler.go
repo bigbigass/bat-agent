@@ -24,6 +24,7 @@ func (s *Server) Routes(authWrap func(http.Handler) http.Handler) http.Handler {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.Handle("/scripts", authWrap(http.HandlerFunc(s.handleScripts)))
 	mux.Handle("/run", authWrap(http.HandlerFunc(s.handleRun)))
+	mux.Handle("/run/stream", authWrap(http.HandlerFunc(s.handleRunStream)))
 	return accessLog(mux)
 }
 
@@ -53,6 +54,29 @@ type runResponse struct {
 	DurationMs int64     `json:"durationMs"`
 	TimedOut   bool      `json:"timedOut,omitempty"`
 	Error      string    `json:"error,omitempty"`
+}
+
+type streamOutputResponse struct {
+	Type   string `json:"type"`
+	Script string `json:"script"`
+	Stream string `json:"stream"`
+	Data   string `json:"data"`
+}
+
+type streamFinalResponse struct {
+	Type       string    `json:"type"`
+	Script     string    `json:"script"`
+	ExitCode   int       `json:"exitCode"`
+	TimedOut   bool      `json:"timedOut"`
+	StartedAt  time.Time `json:"startedAt"`
+	FinishedAt time.Time `json:"finishedAt"`
+	DurationMs int64     `json:"durationMs"`
+	Error      string    `json:"error,omitempty"`
+}
+
+type streamRunResult struct {
+	result executor.Result
+	err    error
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -103,6 +127,135 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		resp.Error = err.Error()
 	}
 	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req runRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+
+	outputs := make(chan streamOutputResponse, 64)
+	done := make(chan streamRunResult, 1)
+	go func() {
+		result, err := s.exec.RunStream(context.Background(), req.Script, func(chunk executor.OutputChunk) {
+			outputs <- streamOutputResponse{
+				Type:   "output",
+				Script: req.Script,
+				Stream: chunk.Stream,
+				Data:   chunk.Data,
+			}
+		})
+		done <- streamRunResult{result: result, err: err}
+		close(outputs)
+	}()
+
+	var enc *json.Encoder
+	streaming := false
+	startStream := func() {
+		if streaming {
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		enc = json.NewEncoder(w)
+		streaming = true
+	}
+
+	for {
+		select {
+		case out, ok := <-outputs:
+			if !ok {
+				outputs = nil
+				continue
+			}
+			startStream()
+			if err := enc.Encode(out); err != nil {
+				go drainStream(outputs, done)
+				return
+			}
+			flush(w)
+		case run := <-done:
+			if !streaming && writePreflightStreamError(w, run.result, run.err) {
+				return
+			}
+			startStream()
+			for out := range outputs {
+				if err := enc.Encode(out); err != nil {
+					go drainOutputs(outputs)
+					return
+				}
+				flush(w)
+			}
+			_ = enc.Encode(streamFinalFromResult(run.result, run.err))
+			flush(w)
+			return
+		}
+	}
+}
+
+func drainStream(outputs <-chan streamOutputResponse, done <-chan streamRunResult) {
+	for outputs != nil || done != nil {
+		select {
+		case _, ok := <-outputs:
+			if !ok {
+				outputs = nil
+			}
+		case <-done:
+			done = nil
+		}
+	}
+}
+
+func drainOutputs(outputs <-chan streamOutputResponse) {
+	for range outputs {
+	}
+}
+
+func writePreflightStreamError(w http.ResponseWriter, result executor.Result, err error) bool {
+	switch {
+	case errors.Is(err, executor.ErrInvalidScriptName):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
+		return true
+	case errors.Is(err, executor.ErrScriptNotFound):
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": executor.StableError(err)})
+		return true
+	case errors.Is(err, executor.ErrScriptBusy):
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error":  executor.StableError(err),
+			"script": result.Script,
+		})
+		return true
+	default:
+		return false
+	}
+}
+
+func streamFinalFromResult(result executor.Result, err error) streamFinalResponse {
+	resp := streamFinalResponse{
+		Type:       "final",
+		Script:     result.Script,
+		ExitCode:   result.ExitCode,
+		TimedOut:   result.TimedOut,
+		StartedAt:  result.StartedAt,
+		FinishedAt: result.FinishedAt,
+		DurationMs: result.FinishedAt.Sub(result.StartedAt).Milliseconds(),
+	}
+	if err != nil {
+		resp.Error = executor.StableError(err)
+	}
+	return resp
+}
+
+func flush(w http.ResponseWriter) {
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, body any) {
