@@ -16,6 +16,7 @@ import (
 
 	"github.com/liqixin/deploy-agent/internal/auth"
 	"github.com/liqixin/deploy-agent/internal/config"
+	"github.com/liqixin/deploy-agent/internal/executor"
 	"github.com/liqixin/deploy-agent/internal/httpapi"
 	"github.com/liqixin/deploy-agent/internal/registry"
 )
@@ -61,7 +62,8 @@ func run() error {
 	go reg.WatchRescan(ctx, 60*time.Second)
 
 	timeout := time.Duration(cfg.Runner.TimeoutSeconds) * time.Second
-	api := httpapi.New(reg, timeout)
+	exec := executor.New(reg, timeout)
+	api := httpapi.New(exec)
 	authWrap := func(h http.Handler) http.Handler {
 		return auth.BasicAuth(cfg.Auth.Username, cfg.Auth.Password, h)
 	}

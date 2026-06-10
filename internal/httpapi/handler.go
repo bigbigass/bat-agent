@@ -8,17 +8,15 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/liqixin/deploy-agent/internal/registry"
-	"github.com/liqixin/deploy-agent/internal/runner"
+	"github.com/liqixin/deploy-agent/internal/executor"
 )
 
 type Server struct {
-	reg     *registry.Registry
-	timeout time.Duration
+	exec *executor.Executor
 }
 
-func New(reg *registry.Registry, timeout time.Duration) *Server {
-	return &Server{reg: reg, timeout: timeout}
+func New(exec *executor.Executor) *Server {
+	return &Server{exec: exec}
 }
 
 func (s *Server) Routes(authWrap func(http.Handler) http.Handler) http.Handler {
@@ -38,7 +36,7 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scripts": s.reg.List()})
+	writeJSON(w, http.StatusOK, map[string]any{"scripts": s.exec.List()})
 }
 
 type runRequest struct {
@@ -67,31 +65,26 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	entry, err := s.reg.Lookup(req.Script)
+	result, err := s.exec.RunCollect(context.Background(), req.Script)
 	if err != nil {
-		if errors.Is(err, registry.ErrInvalid) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid script name"})
+		switch {
+		case errors.Is(err, executor.ErrInvalidScriptName):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
+			return
+		case errors.Is(err, executor.ErrScriptNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": executor.StableError(err)})
+			return
+		case errors.Is(err, executor.ErrScriptBusy):
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error":  executor.StableError(err),
+				"script": result.Script,
+			})
 			return
 		}
-		if errors.Is(err, registry.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "script not found"})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
 	}
-	if !entry.TryLock() {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error":  "script is already running",
-			"script": entry.Name,
-		})
-		return
-	}
-	defer entry.Unlock()
 
-	result, err := runner.Run(context.Background(), entry.Path, s.timeout)
 	resp := runResponse{
-		Script:     entry.Name,
+		Script:     result.Script,
 		ExitCode:   result.ExitCode,
 		Stdout:     result.Stdout,
 		Stderr:     result.Stderr,

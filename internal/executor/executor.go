@@ -43,6 +43,10 @@ func New(reg *registry.Registry, timeout time.Duration) *Executor {
 	return &Executor{reg: reg, timeout: timeout}
 }
 
+func (e *Executor) List() []string {
+	return e.reg.List()
+}
+
 func (e *Executor) RunCollect(ctx context.Context, script string) (Result, error) {
 	return e.RunStream(ctx, script, nil)
 }
