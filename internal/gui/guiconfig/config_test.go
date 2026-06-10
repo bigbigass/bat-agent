@@ -18,6 +18,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Username != "admin" {
 		t.Fatalf("Username = %q, want admin", cfg.Username)
 	}
+	if cfg.Password != "" {
+		t.Fatalf("Password = %q, want empty", cfg.Password)
+	}
 }
 
 func TestSaveAndLoadRoundTrip(t *testing.T) {
