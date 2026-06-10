@@ -10,7 +10,9 @@
 build.bat
 ```
 
-产物：`deploy-agent.exe`（已内嵌 UAC 清单，双击会弹管理员确认框）。
+产物：`deploy-agent.exe`（已内嵌 UAC 清单，双击会弹管理员确认框）和 `deploy-agent-gui.exe`。
+
+GUI 使用 Fyne 构建，需要启用 CGO，并且 PATH 中有可用的 C 编译器（如 gcc）。
 
 ## 配置
 
@@ -107,6 +109,24 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 | 409 | 同名脚本正在执行（同名串行） |
 | 500 | 启动进程失败 |
 | 504 | 执行超时，返回体 `timedOut: true` |
+
+### `POST /run/stream`
+
+需要 Basic Auth。请求体与 `/run` 一致：
+
+```json
+{"script":"deploy.bat"}
+```
+
+响应是 NDJSON，每一行一个 JSON：
+
+```json
+{"type":"output","script":"deploy.bat","stream":"stdout","data":"开始部署...\r\n"}
+{"type":"output","script":"deploy.bat","stream":"stderr","data":"warning...\r\n"}
+{"type":"final","script":"deploy.bat","exitCode":0,"timedOut":false,"startedAt":"2026-06-10T10:00:00+08:00","finishedAt":"2026-06-10T10:00:03+08:00","durationMs":3142}
+```
+
+一旦进入流式响应，HTTP 状态码保持 `200`。脚本超时、非零退出码或 runner 错误通过最后一条 `type: "final"` 判断。调度前错误仍返回普通 JSON 错误和对应 HTTP 状态码。
 
 ## MQTT API
 
@@ -249,6 +269,30 @@ curl -u admin:change-me-please -X POST http://localhost:8080/run \
 whoami /groups | findstr "S-1-16-12288"
 ```
 触发执行后 stdout 里能看到 `S-1-16-12288`（High Mandatory Level），说明脚本是以管理员身份跑的。
+
+## GUI 管理端
+
+`deploy-agent-gui.exe` 是独立 Windows 桌面程序，用于连接和管理 `deploy-agent`。
+
+本机模式：
+
+- 将 `deploy-agent-gui.exe` 与 `deploy-agent.exe` 放在同一目录。
+- GUI 会启动或停止同目录的 `deploy-agent.exe`。
+- 如果服务不是由 GUI 启动，第一版不会强制结束未知进程。
+
+远程模式：
+
+- 填写远程服务地址、HTTP Basic Auth 用户名和密码。
+- GUI 通过 `/scripts` 列出脚本，通过 `/run/stream` 执行脚本并实时显示输出。
+
+GUI 会把服务地址、用户名和密码保存到本地配置文件，默认在用户配置目录下的 `deploy-agent-gui/config.json`。这是便捷存储，不是强安全存储；请保护该文件权限，不要提交或分享它。
+
+第一版限制：
+
+- 不支持脚本参数。
+- 不支持中止正在运行的脚本。
+- 不持久化执行历史。
+- 不提供系统托盘。
 
 ## 安全说明
 
