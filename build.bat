@@ -40,7 +40,7 @@ echo Embedding deploy-agent-gui manifest...
 
 echo Building deploy-agent-gui.exe...
 set CGO_ENABLED=1
-go build -ldflags "-s -w" -o deploy-agent-gui.exe .\cmd\deploy-agent-gui || goto :error
+go build -ldflags "-H=windowsgui -s -w" -o deploy-agent-gui.exe .\cmd\deploy-agent-gui || goto :error
 
 echo Done: deploy-agent.exe deploy-agent-gui.exe
 exit /b 0
