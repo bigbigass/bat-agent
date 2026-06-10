@@ -5,11 +5,70 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/liqixin/deploy-agent/internal/executor"
 )
+
+type Config struct {
+	Broker       string
+	ClientID     string
+	Username     string
+	Password     string
+	CommandTopic string
+	QoS          byte
+}
+
+type Client struct {
+	cfg  Config
+	exec *executor.Executor
+}
+
+func NewClient(cfg Config, exec *executor.Executor) *Client {
+	return &Client{cfg: cfg, exec: exec}
+}
+
+func (c *Client) Start(ctx context.Context) error {
+	opts := paho.NewClientOptions()
+	opts.AddBroker(c.cfg.Broker)
+	opts.SetClientID(c.cfg.ClientID)
+	opts.SetAutoReconnect(true)
+	if c.cfg.Username != "" {
+		opts.SetUsername(c.cfg.Username)
+	}
+	if c.cfg.Password != "" {
+		opts.SetPassword(c.cfg.Password)
+	}
+
+	client := paho.NewClient(opts)
+	if token := client.Connect(); token.Wait() && token.Error() != nil {
+		return token.Error()
+	}
+
+	pub := NewPahoPublisher(client, c.cfg.QoS)
+	handler := NewHandler(c.exec, pub, c.cfg.QoS)
+	token := client.Subscribe(c.cfg.CommandTopic, c.cfg.QoS, func(_ paho.Client, msg paho.Message) {
+		payload := append([]byte(nil), msg.Payload()...)
+		go func() {
+			if err := handler.Handle(ctx, payload); err != nil {
+				log.Printf("mqtt command rejected: %v", err)
+			}
+		}()
+	})
+	if token.Wait() && token.Error() != nil {
+		client.Disconnect(250)
+		return token.Error()
+	}
+
+	log.Printf("mqtt connected to %s and subscribed %s", c.cfg.Broker, c.cfg.CommandTopic)
+	go func() {
+		<-ctx.Done()
+		client.Disconnect(250)
+	}()
+	return nil
+}
 
 type Publisher interface {
 	Publish(ctx context.Context, topic string, payload []byte) error
