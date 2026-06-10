@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -39,6 +40,10 @@ type OutputChunk struct {
 	Data   string
 }
 
+// OutputFunc receives decoded stdout/stderr chunks from RunStream. Callbacks
+// are invoked synchronously and serialized across both streams, and must return
+// promptly. Callers that publish to a network or other slow sink should enqueue
+// work and publish outside the runner callback.
 type OutputFunc func(OutputChunk)
 
 // Run executes the given .bat/.cmd script via cmd.exe and returns captured
@@ -49,7 +54,9 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 }
 
 // RunStream executes the given .bat/.cmd script via cmd.exe, captures output,
-// and optionally streams stdout/stderr chunks as they are written.
+// and optionally streams stdout/stderr chunks as they are written. Output
+// callbacks are invoked synchronously and serialized across both streams, so a
+// slow callback can block script output processing.
 func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput OutputFunc) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -59,8 +66,9 @@ func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput
 
 	stdoutBuf := &cappedBuffer{limit: maxOutputBytes}
 	stderrBuf := &cappedBuffer{limit: maxOutputBytes}
-	stdoutWriter := &streamCaptureWriter{capture: stdoutBuf, stream: StreamStdout, onOutput: onOutput}
-	stderrWriter := &streamCaptureWriter{capture: stderrBuf, stream: StreamStderr, onOutput: onOutput}
+	emit := serializedOutputFunc(onOutput)
+	stdoutWriter := &streamCaptureWriter{capture: stdoutBuf, stream: StreamStdout, onOutput: emit}
+	stderrWriter := &streamCaptureWriter{capture: stderrBuf, stream: StreamStderr, onOutput: emit}
 	cmd.Stdout = stdoutWriter
 	cmd.Stderr = stderrWriter
 
@@ -99,6 +107,18 @@ func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput
 	}
 	res.ExitCode = 0
 	return res, nil
+}
+
+func serializedOutputFunc(onOutput OutputFunc) OutputFunc {
+	if onOutput == nil {
+		return nil
+	}
+	var mu sync.Mutex
+	return func(chunk OutputChunk) {
+		mu.Lock()
+		defer mu.Unlock()
+		onOutput(chunk)
+	}
 }
 
 type streamCaptureWriter struct {

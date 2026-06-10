@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -64,6 +65,37 @@ func TestRunStreamCapturesAndStreamsStderr(t *testing.T) {
 	}
 	if !strings.Contains(streamedStderr, "problem") {
 		t.Fatalf("streamed stderr = %q, want it to contain problem", streamedStderr)
+	}
+}
+
+func TestRunStreamSerializesOutputCallbacks(t *testing.T) {
+	scriptPath := writeBatch(t, strings.Join([]string{
+		"@echo off",
+		"for /l %%i in (1,1,200) do (",
+		"  echo out %%i",
+		"  echo err %%i 1>&2",
+		")",
+		"",
+	}, "\r\n"))
+
+	var inCallback atomic.Bool
+	var reentered atomic.Bool
+	res, err := RunStream(context.Background(), scriptPath, 5*time.Second, func(OutputChunk) {
+		if !inCallback.CompareAndSwap(false, true) {
+			reentered.Store(true)
+			return
+		}
+		time.Sleep(time.Millisecond)
+		inCallback.Store(false)
+	})
+	if err != nil {
+		t.Fatalf("RunStream returned error: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", res.ExitCode)
+	}
+	if reentered.Load() {
+		t.Fatal("output callback was invoked concurrently")
 	}
 }
 
