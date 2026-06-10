@@ -97,6 +97,10 @@ func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput
 	res.Stdout = decodeOutput(stdoutBuf.Bytes())
 	res.Stderr = decodeOutput(stderrBuf.Bytes())
 
+	if res.TimedOut {
+		return res, nil
+	}
+
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {

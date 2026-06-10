@@ -126,6 +126,29 @@ func TestRunStreamNonZeroExitCodeReturnsNilError(t *testing.T) {
 	}
 }
 
+func TestRunStreamTimeoutKeepsExitCodeMinusOne(t *testing.T) {
+	scriptPath := writeBatch(t, strings.Join([]string{
+		"@echo off",
+		"echo before timeout",
+		"ping 127.0.0.1 -n 3 >nul",
+		"",
+	}, "\r\n"))
+
+	res, err := RunStream(context.Background(), scriptPath, 100*time.Millisecond, nil)
+	if err != nil {
+		t.Fatalf("RunStream returned error: %v", err)
+	}
+	if !res.TimedOut {
+		t.Fatal("TimedOut = false, want true")
+	}
+	if res.ExitCode != -1 {
+		t.Fatalf("ExitCode = %d, want -1", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "before timeout") {
+		t.Fatalf("Stdout = %q, want it to contain before timeout", res.Stdout)
+	}
+}
+
 func TestStreamCaptureWriterBuffersSplitUTF8Rune(t *testing.T) {
 	var chunks []OutputChunk
 	writer := &streamCaptureWriter{
