@@ -112,6 +112,8 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 
 MQTT 调度需要显式开启 `services.mqtt.enabled`。HTTP 和 MQTT 共用同一套脚本白名单、脚本名校验、同名脚本锁和超时规则。
 
+显示程序应先订阅命令 payload 里的 `replyTo`，再向命令 topic 发布命令。输出消息和最终消息都不会设置 retained；如果脚本很快完成，发布命令后才订阅 `replyTo` 可能会错过实时输出或最终消息。
+
 ### 命令 Topic
 
 服务订阅固定命令 topic，默认值：
@@ -211,8 +213,9 @@ deploy-agent/run
 
 ### MQTT 错误处理
 
-- 有 `replyTo` 时，服务会尽量发布 `done=true` 的错误消息。
+- payload 是合法 JSON 且有 `replyTo` 时，服务会尽量发布 `done=true` 的错误消息。
 - 缺少 `replyTo` 或无法可靠解析 `replyTo` 时，只记录服务日志，不发布 MQTT 响应。
+- `invalid JSON body` 表示命令 payload 不是合法 JSON，此时无法可靠解析 `replyTo`，因此通常只作为稳定日志错误文本出现，不会作为 MQTT 响应发出。
 - 稳定错误文本包括：
 
 ```text
