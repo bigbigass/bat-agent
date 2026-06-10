@@ -1,3 +1,5 @@
+//go:build cgo
+
 package main
 
 import (
@@ -29,6 +31,10 @@ type guiState struct {
 
 	scriptSelect *widget.Select
 	runButton    *widget.Button
+
+	connectSeq int
+	refreshSeq int
+	running    bool
 }
 
 func main() {
@@ -134,22 +140,45 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 }
 
 func (s *guiState) connect() {
+	s.connectSeq++
+	seq := s.connectSeq
 	s.setStatus("连接中...")
 	client := apiclient.New(s.config.BaseURL, s.config.Username, s.config.Password)
-	s.client = client
+	s.client = nil
+	s.refreshSeq++
+	s.clearScripts()
 
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := client.Health(ctx); err != nil {
 			fyne.Do(func() {
+				if seq != s.connectSeq {
+					return
+				}
 				s.setStatus("连接失败: " + err.Error())
 			})
 			return
 		}
+
+		scripts, err := client.Scripts(ctx)
+		if err != nil {
+			fyne.Do(func() {
+				if seq != s.connectSeq {
+					return
+				}
+				s.setStatus("连接失败: " + err.Error())
+			})
+			return
+		}
+
 		fyne.Do(func() {
-			s.setStatus("已连接")
-			s.refreshScripts()
+			if seq != s.connectSeq {
+				return
+			}
+			s.client = client
+			s.applyScripts(scripts)
+			s.setStatus(fmt.Sprintf("已连接，已加载 %d 个脚本", len(scripts)))
 		})
 	}()
 }
@@ -160,6 +189,8 @@ func (s *guiState) refreshScripts() {
 		s.setStatus("请先连接服务")
 		return
 	}
+	s.refreshSeq++
+	seq := s.refreshSeq
 	s.setStatus("刷新脚本中...")
 
 	go func() {
@@ -167,28 +198,14 @@ func (s *guiState) refreshScripts() {
 		defer cancel()
 		scripts, err := client.Scripts(ctx)
 		fyne.Do(func() {
+			if seq != s.refreshSeq || client != s.client {
+				return
+			}
 			if err != nil {
 				s.setStatus("刷新脚本失败: " + err.Error())
 				return
 			}
-			s.scriptSelect.Options = scripts
-			if len(scripts) == 0 {
-				s.scriptSelect.ClearSelected()
-				s.runButton.Disable()
-			} else {
-				found := false
-				for _, script := range scripts {
-					if script == s.scriptSelect.Selected {
-						found = true
-						break
-					}
-				}
-				if !found {
-					s.scriptSelect.SetSelected(scripts[0])
-				}
-				s.runButton.Enable()
-			}
-			s.scriptSelect.Refresh()
+			s.applyScripts(scripts)
 			s.setStatus(fmt.Sprintf("已加载 %d 个脚本", len(scripts)))
 		})
 	}()
@@ -206,7 +223,8 @@ func (s *guiState) runSelectedScript() {
 		return
 	}
 
-	s.runButton.Disable()
+	s.running = true
+	s.updateRunButton()
 	_ = s.outputText.Set("")
 	s.setStatus("运行中: " + script)
 
@@ -224,9 +242,60 @@ func (s *guiState) runSelectedScript() {
 			})
 		}
 		fyne.Do(func() {
-			s.runButton.Enable()
+			s.running = false
+			s.updateRunButton()
 		})
 	}()
+}
+
+func (s *guiState) applyScripts(scripts []string) {
+	if s.scriptSelect == nil {
+		return
+	}
+	selected := s.scriptSelect.Selected
+	s.scriptSelect.Options = scripts
+	if len(scripts) == 0 {
+		s.scriptSelect.ClearSelected()
+		s.scriptSelect.Refresh()
+		s.updateRunButton()
+		return
+	}
+
+	found := false
+	for _, script := range scripts {
+		if script == selected {
+			found = true
+			break
+		}
+	}
+	if found {
+		s.scriptSelect.SetSelected(selected)
+	} else {
+		s.scriptSelect.SetSelected(scripts[0])
+	}
+	s.scriptSelect.Refresh()
+	s.updateRunButton()
+}
+
+func (s *guiState) clearScripts() {
+	if s.scriptSelect == nil {
+		return
+	}
+	s.scriptSelect.Options = nil
+	s.scriptSelect.ClearSelected()
+	s.scriptSelect.Refresh()
+	s.updateRunButton()
+}
+
+func (s *guiState) updateRunButton() {
+	if s.runButton == nil {
+		return
+	}
+	if s.client != nil && !s.running && s.scriptSelect.Selected != "" {
+		s.runButton.Enable()
+		return
+	}
+	s.runButton.Disable()
 }
 
 func (s *guiState) handleEvent(event apiclient.StreamEvent) {
