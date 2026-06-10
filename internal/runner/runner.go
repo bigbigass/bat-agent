@@ -59,33 +59,22 @@ func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput
 
 	stdoutBuf := &cappedBuffer{limit: maxOutputBytes}
 	stderrBuf := &cappedBuffer{limit: maxOutputBytes}
+	stdoutWriter := &streamCaptureWriter{capture: stdoutBuf, stream: StreamStdout, onOutput: onOutput}
+	stderrWriter := &streamCaptureWriter{capture: stderrBuf, stream: StreamStderr, onOutput: onOutput}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 
 	res := Result{ExitCode: -1, StartedAt: time.Now()}
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	err := cmd.Start()
 	if err != nil {
 		res.FinishedAt = time.Now()
 		return res, err
 	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		res.FinishedAt = time.Now()
-		return res, err
-	}
-
-	err = cmd.Start()
-	if err != nil {
-		res.FinishedAt = time.Now()
-		return res, err
-	}
-
-	outputDone := make(chan error, 2)
-	go captureOutput(stdoutPipe, stdoutBuf, StreamStdout, onOutput, outputDone)
-	go captureOutput(stderrPipe, stderrBuf, StreamStderr, onOutput, outputDone)
 
 	waitErr := cmd.Wait()
-	stdoutErr := <-outputDone
-	stderrErr := <-outputDone
+	stdoutWriter.Flush()
+	stderrWriter.Flush()
 	res.FinishedAt = time.Now()
 
 	if ctx.Err() == context.DeadlineExceeded {
@@ -100,15 +89,6 @@ func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput
 	res.Stdout = decodeOutput(stdoutBuf.Bytes())
 	res.Stderr = decodeOutput(stderrBuf.Bytes())
 
-	if stdoutErr != nil {
-		return res, stdoutErr
-	}
-	if stderrErr != nil {
-		return res, stderrErr
-	}
-	if res.TimedOut {
-		return res, nil
-	}
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
@@ -121,29 +101,105 @@ func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput
 	return res, nil
 }
 
-func captureOutput(r io.Reader, capture *cappedBuffer, stream Stream, onOutput OutputFunc, done chan<- error) {
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
-			_, _ = capture.Write(chunk)
-			if onOutput != nil {
-				onOutput(OutputChunk{
-					Stream: stream,
-					Data:   decodeOutput(chunk),
-				})
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				done <- nil
-				return
-			}
-			done <- err
-			return
-		}
+type streamCaptureWriter struct {
+	capture  *cappedBuffer
+	stream   Stream
+	onOutput OutputFunc
+	pending  []byte
+}
+
+func (w *streamCaptureWriter) Write(p []byte) (int, error) {
+	if _, err := w.capture.Write(p); err != nil {
+		return 0, err
 	}
+	if w.onOutput != nil {
+		w.emit(p)
+	}
+	return len(p), nil
+}
+
+func (w *streamCaptureWriter) Flush() {
+	if len(w.pending) == 0 || w.onOutput == nil {
+		w.pending = nil
+		return
+	}
+	w.onOutput(OutputChunk{Stream: w.stream, Data: decodeOutput(w.pending)})
+	w.pending = nil
+}
+
+func (w *streamCaptureWriter) emit(p []byte) {
+	b := append(w.pending, p...)
+	w.pending = nil
+
+	complete, pending, ok := splitUTF8Complete(b)
+	if ok {
+		w.pending = append(w.pending, pending...)
+		if len(complete) > 0 {
+			w.onOutput(OutputChunk{Stream: w.stream, Data: string(complete)})
+		}
+		return
+	}
+
+	complete, pending = splitGBKComplete(b)
+	w.pending = append(w.pending, pending...)
+	if len(complete) > 0 {
+		w.onOutput(OutputChunk{Stream: w.stream, Data: decodeOutput(complete)})
+	}
+}
+
+func splitUTF8Complete(b []byte) (complete []byte, pending []byte, ok bool) {
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size == 1 {
+			if utf8SequenceSize(b[i]) > len(b)-i {
+				return b[:i], b[i:], true
+			}
+			return nil, nil, false
+		}
+		i += size
+	}
+	return b, nil, true
+}
+
+func utf8SequenceSize(b byte) int {
+	switch {
+	case b < 0x80:
+		return 1
+	case b >= 0xC2 && b <= 0xDF:
+		return 2
+	case b >= 0xE0 && b <= 0xEF:
+		return 3
+	case b >= 0xF0 && b <= 0xF4:
+		return 4
+	default:
+		return 0
+	}
+}
+
+func splitGBKComplete(b []byte) (complete []byte, pending []byte) {
+	for i := 0; i < len(b); {
+		if b[i] <= 0x7F {
+			i++
+			continue
+		}
+		if isGBKLeadByte(b[i]) && i+1 >= len(b) {
+			return b[:i], b[i:]
+		}
+		if isGBKLeadByte(b[i]) && isGBKTrailByte(b[i+1]) {
+			i += 2
+			continue
+		}
+		i++
+	}
+	return b, nil
+}
+
+func isGBKLeadByte(b byte) bool {
+	return b >= 0x81 && b <= 0xFE
+}
+
+func isGBKTrailByte(b byte) bool {
+	return b >= 0x40 && b <= 0xFE && b != 0x7F
 }
 
 // killTree uses taskkill to terminate the pid and all descendants.
