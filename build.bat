@@ -30,12 +30,16 @@ if not exist "%RSRC%" (
 echo Embedding manifest...
 "%RSRC%" -manifest deploy-agent.manifest -o resource.syso || goto :error
 
-echo Building...
+echo Building deploy-agent.exe...
 set GOOS=windows
 set CGO_ENABLED=0
 go build -ldflags "-s -w" -o deploy-agent.exe . || goto :error
 
-echo Done: deploy-agent.exe
+echo Building deploy-agent-gui.exe...
+set CGO_ENABLED=1
+go build -ldflags "-s -w" -o deploy-agent-gui.exe .\cmd\deploy-agent-gui || goto :error
+
+echo Done: deploy-agent.exe deploy-agent-gui.exe
 exit /b 0
 
 :error
