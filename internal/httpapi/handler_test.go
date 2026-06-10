@@ -407,6 +407,38 @@ func TestRunStreamReturnsOutputAndFinalMessages(t *testing.T) {
 	}
 }
 
+func TestRunStreamNoOutputStillReturnsFinal(t *testing.T) {
+	server := makeServer(t, map[string]string{"quiet.bat": "@echo off\r\nexit /b 0\r\n"})
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+
+	go func() {
+		server.handler.ServeHTTP(rec, postRunStream("quiet.bat"))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not finish for script without output")
+	}
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	messages := decodeNDJSON(t, rec.Body.String())
+	if len(messages) != 1 {
+		t.Fatalf("expected only final message, got %d body=%s", len(messages), rec.Body.String())
+	}
+	final := messages[0]
+	if rawString(t, final, "type") != "final" {
+		t.Fatalf("final type = %q, want final", rawString(t, final, "type"))
+	}
+	if rawInt(t, final, "exitCode") != 0 {
+		t.Fatalf("exitCode = %d, want 0", rawInt(t, final, "exitCode"))
+	}
+}
+
 func TestRunStreamNonZeroExitCodeFinalHasNoError(t *testing.T) {
 	server := makeServer(t, map[string]string{"fail.bat": "@echo off\r\nexit /b 7\r\n"})
 	rec := httptest.NewRecorder()

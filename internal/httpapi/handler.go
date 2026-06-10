@@ -185,12 +185,14 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			startStream()
-			for out := range outputs {
-				if err := enc.Encode(out); err != nil {
-					go drainOutputs(outputs)
-					return
+			if outputs != nil {
+				for out := range outputs {
+					if err := enc.Encode(out); err != nil {
+						go drainOutputs(outputs)
+						return
+					}
+					flush(w)
 				}
-				flush(w)
 			}
 			_ = enc.Encode(streamFinalFromResult(run.result, run.err))
 			flush(w)
