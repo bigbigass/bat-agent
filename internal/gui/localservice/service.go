@@ -3,10 +3,20 @@ package localservice
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
+)
+
+var (
+	killProcessTree = func(pid int) error {
+		return exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid)).Run()
+	}
+	killProcess = func(process *os.Process) error {
+		return process.Kill()
+	}
 )
 
 type Manager struct {
@@ -59,16 +69,25 @@ func (m *Manager) Stop() (bool, error) {
 	}
 	cmd := m.cmd
 	pid := cmd.Process.Pid
-	m.cmd = nil
 	m.mu.Unlock()
 
-	if err := exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid)).Run(); err != nil {
-		if killErr := cmd.Process.Kill(); killErr != nil {
-			return true, fmt.Errorf("stop process tree: %w; kill process: %v", err, killErr)
+	if err := killProcessTree(pid); err != nil {
+		if killErr := killProcess(cmd.Process); killErr != nil {
+			return false, fmt.Errorf("stop process tree: %w; kill process: %v", err, killErr)
 		}
+		m.clear(cmd)
 		return true, fmt.Errorf("stop process tree: %w", err)
 	}
+	m.clear(cmd)
 	return true, nil
+}
+
+func (m *Manager) clear(cmd *exec.Cmd) {
+	m.mu.Lock()
+	if m.cmd == cmd {
+		m.cmd = nil
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) Running() bool {

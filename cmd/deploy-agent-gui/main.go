@@ -375,16 +375,20 @@ func (s *guiState) stopLocalService() {
 	go func() {
 		stopped, err := s.service.Stop()
 		fyne.Do(func() {
-			if err != nil {
-				s.setStatus("停止服务失败: " + err.Error())
-				return
-			}
 			if stopped {
 				s.client = nil
 				s.connectSeq++
 				s.refreshSeq++
 				s.clearScripts()
+				if err != nil {
+					s.setStatus("服务已停止，但进程树清理失败: " + err.Error())
+					return
+				}
 				s.setStatus("服务已停止")
+				return
+			}
+			if err != nil {
+				s.setStatus("停止服务失败: " + err.Error())
 				return
 			}
 			s.setStatus("未停止：服务不是由 GUI 启动")
