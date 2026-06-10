@@ -20,6 +20,17 @@ build.bat
 server:
   host: 0.0.0.0
   port: 8080
+services:
+  http:
+    enabled: true
+  mqtt:
+    enabled: false
+    broker: "tcp://127.0.0.1:1883"
+    clientId: "deploy-agent"
+    username: ""
+    password: ""
+    commandTopic: "deploy-agent/run"
+    qos: 1
 auth:
   username: admin
   password: change-me-please        # 长度 ≥ 8
@@ -29,6 +40,16 @@ runner:
 ```
 
 `config.yaml` 优先从 exe 同目录读，没有则从当前工作目录读。
+
+默认只启用 HTTP；MQTT 需要把 `services.mqtt.enabled` 显式设为 `true` 才会连接 broker 并订阅命令 topic。
+
+### HTTP / MQTT 开关
+
+- `services.http.enabled` 控制 HTTP 服务，默认 `true`。
+- `services.mqtt.enabled` 控制 MQTT 调度，默认 `false`。
+- 至少需要启用 HTTP 或 MQTT 中的一种。
+- MQTT `broker` 支持 `tcp://` 和 `ssl://`。
+- MQTT 鉴权依赖 broker 的账号、密码、TLS 和 ACL；`auth` 里的 Basic Auth 只用于 HTTP。
 
 ## 运行
 
@@ -43,6 +64,8 @@ deploy-agent.exe
 ## HTTP API
 
 所有除 `/health` 之外的端点都要 Basic Auth。
+
+HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次性返回最终结果。脚本自身 `exitCode` 非 0 时，HTTP 仍返回 200，调用方需要读取响应里的 `exitCode` 判断脚本是否成功。
 
 ### `GET /health`
 不鉴权。
@@ -84,6 +107,124 @@ deploy-agent.exe
 | 409 | 同名脚本正在执行（同名串行） |
 | 500 | 启动进程失败 |
 | 504 | 执行超时，返回体 `timedOut: true` |
+
+## MQTT API
+
+MQTT 调度需要显式开启 `services.mqtt.enabled`。HTTP 和 MQTT 共用同一套脚本白名单、脚本名校验、同名脚本锁和超时规则。
+
+### 命令 Topic
+
+服务订阅固定命令 topic，默认值：
+
+```text
+deploy-agent/run
+```
+
+可通过 `services.mqtt.commandTopic` 修改。
+
+### 命令 Payload
+
+```json
+{
+  "requestId": "abc-123",
+  "script": "deploy.bat",
+  "replyTo": "deploy-agent/replies/abc-123"
+}
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `requestId` | 是 | 调用方生成的请求 ID，用于关联一次执行 |
+| `script` | 是 | 要执行的白名单脚本文件名 |
+| `replyTo` | 是 | deploy-agent 发布实时输出和最终结果的 MQTT topic |
+
+### 实时输出消息
+
+脚本运行过程中，服务会把 `stdout` / `stderr` 分块发布到 `replyTo`：
+
+```json
+{
+  "requestId": "abc-123",
+  "script": "deploy.bat",
+  "stream": "stdout",
+  "data": "正在部署第 1 步...\r\n",
+  "done": false
+}
+```
+
+实时输出消息字段：
+
+| 字段 | 说明 |
+|---|---|
+| `requestId` | 原样返回命令中的 `requestId` |
+| `script` | 原样返回命令中的 `script` |
+| `stream` | `stdout` 或 `stderr` |
+| `data` | 当前输出分块内容 |
+| `done` | 固定为 `false` |
+
+### 最终消息
+
+脚本完成、失败、超时或调度错误时，服务会向 `replyTo` 发布一条最终消息：
+
+```json
+{
+  "requestId": "abc-123",
+  "script": "deploy.bat",
+  "exitCode": 0,
+  "timedOut": false,
+  "startedAt": "2026-06-10T10:00:00+08:00",
+  "finishedAt": "2026-06-10T10:00:03+08:00",
+  "durationMs": 3142,
+  "done": true
+}
+```
+
+最终消息字段：
+
+| 字段 | 说明 |
+|---|---|
+| `requestId` | 能解析到请求 ID 时原样返回 |
+| `script` | 能解析到脚本名时原样返回 |
+| `exitCode` | 脚本退出码；调度失败时可省略；超时时为 `-1` |
+| `timedOut` | 是否超时；调度失败时可省略 |
+| `error` | 调度失败、runner 错误或超时时的错误描述；脚本退出码非零时不设置 |
+| `startedAt` | 脚本进程启动时间；进程未启动时可省略 |
+| `finishedAt` | 脚本进程结束时间；进程未启动时可省略 |
+| `durationMs` | 脚本执行耗时；进程未启动时可省略 |
+| `done` | 固定为 `true` |
+
+`done=false` 表示中间输出；`done=true` 表示最终完成、失败、超时或调度错误。
+
+### 显示端状态判断
+
+另一个显示程序可以按下面的优先级判断状态：
+
+| 条件 | 状态 |
+|---|---|
+| `done == false` | 运行中，追加 `data` 到对应输出窗口 |
+| `done == true && timedOut == true` | 超时 |
+| `done == true && error` 非空 | 调度失败或 runner 错误 |
+| `done == true && exitCode == 0` | 成功 |
+| `done == true && exitCode != 0` | 脚本自身失败 |
+
+如果 `timedOut` 和 `error` 同时存在，优先展示超时，并同时显示 `error` 文本。
+
+### MQTT 错误处理
+
+- 有 `replyTo` 时，服务会尽量发布 `done=true` 的错误消息。
+- 缺少 `replyTo` 或无法可靠解析 `replyTo` 时，只记录服务日志，不发布 MQTT 响应。
+- 稳定错误文本包括：
+
+```text
+invalid JSON body
+missing requestId
+missing replyTo
+invalid script name
+script not found
+script is already running
+runner start failed
+script timed out
+```
 
 ## 使用示例
 
