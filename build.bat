@@ -3,14 +3,32 @@ setlocal
 
 REM Build deploy-agent.exe with UAC-elevating manifest embedded.
 
+set "RSRC=rsrc"
+
 where rsrc >nul 2>nul
-if errorlevel 1 (
-    echo Installing github.com/akavel/rsrc...
-    go install github.com/akavel/rsrc@latest || goto :error
+if not errorlevel 1 goto :have_rsrc
+
+echo Installing github.com/akavel/rsrc...
+go install github.com/akavel/rsrc@latest || goto :error
+
+for /f "delims=" %%G in ('go env GOBIN') do set "GO_TOOL_BIN=%%G"
+if not defined GO_TOOL_BIN (
+    for /f "delims=" %%G in ('go env GOPATH') do set "GO_TOOL_BIN=%%G\bin"
+)
+if not defined GO_TOOL_BIN (
+    echo Could not determine Go tool bin directory.
+    exit /b 1
 )
 
+set "RSRC=%GO_TOOL_BIN%\rsrc.exe"
+if not exist "%RSRC%" (
+    echo Could not find rsrc.exe at "%RSRC%".
+    exit /b 1
+)
+
+:have_rsrc
 echo Embedding manifest...
-rsrc -manifest deploy-agent.manifest -o resource.syso || goto :error
+"%RSRC%" -manifest deploy-agent.manifest -o resource.syso || goto :error
 
 echo Building...
 set GOOS=windows
