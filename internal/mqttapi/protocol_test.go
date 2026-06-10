@@ -12,35 +12,65 @@ func TestParseCommandRequiresFields(t *testing.T) {
 	tests := []struct {
 		name    string
 		payload string
+		wantCmd Command
 		wantErr error
 	}{
 		{
 			name:    "missing replyTo is checked before requestId",
 			payload: `{"script":"deploy.bat"}`,
+			wantCmd: Command{
+				Script: "deploy.bat",
+			},
 			wantErr: ErrMissingReplyTo,
 		},
 		{
 			name:    "missing requestId",
 			payload: `{"replyTo":"deploy/replies","script":"deploy.bat"}`,
+			wantCmd: Command{
+				Script:  "deploy.bat",
+				ReplyTo: "deploy/replies",
+			},
 			wantErr: ErrMissingRequestID,
 		},
 		{
 			name:    "missing script",
 			payload: `{"requestId":"req-1","replyTo":"deploy/replies"}`,
+			wantCmd: Command{
+				RequestID: "req-1",
+				ReplyTo:   "deploy/replies",
+			},
 			wantErr: ErrInvalidScript,
 		},
 		{
 			name:    "blank script",
 			payload: `{"requestId":"req-1","replyTo":"deploy/replies","script":"   "}`,
+			wantCmd: Command{
+				RequestID: "req-1",
+				Script:    "   ",
+				ReplyTo:   "deploy/replies",
+			},
+			wantErr: ErrInvalidScript,
+		},
+		{
+			name:    "invalid script extension",
+			payload: `{"requestId":"req-1","replyTo":"deploy/replies","script":"tool.exe"}`,
+			wantCmd: Command{
+				RequestID: "req-1",
+				Script:    "tool.exe",
+				ReplyTo:   "deploy/replies",
+			},
 			wantErr: ErrInvalidScript,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ParseCommand([]byte(tt.payload))
+			cmd, err := ParseCommand([]byte(tt.payload))
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("expected %v, got %v", tt.wantErr, err)
+			}
+			if cmd != tt.wantCmd {
+				t.Fatalf("expected command %#v, got %#v", tt.wantCmd, cmd)
 			}
 		})
 	}
@@ -114,7 +144,7 @@ func TestFinalMessageShape(t *testing.T) {
 		TimedOut:   &timedOut,
 		StartedAt:  &startedAt,
 		FinishedAt: &finishedAt,
-		DurationMS: 1500,
+		DurationMs: 1500,
 		Done:       true,
 	})
 	if err != nil {

@@ -3,6 +3,7 @@ package mqttapi
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -26,13 +27,13 @@ func ParseCommand(payload []byte) (Command, error) {
 		return Command{}, ErrInvalidJSON
 	}
 	if strings.TrimSpace(cmd.ReplyTo) == "" {
-		return Command{}, ErrMissingReplyTo
+		return cmd, ErrMissingReplyTo
 	}
 	if strings.TrimSpace(cmd.RequestID) == "" {
-		return Command{}, ErrMissingRequestID
+		return cmd, ErrMissingRequestID
 	}
 	if !validScriptName(cmd.Script) {
-		return Command{}, ErrInvalidScript
+		return cmd, ErrInvalidScript
 	}
 	return cmd, nil
 }
@@ -41,7 +42,10 @@ func validScriptName(name string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
-	return !strings.ContainsAny(name, `/\:`) && !strings.Contains(name, "..")
+	ext := strings.ToLower(filepath.Ext(name))
+	return (ext == ".bat" || ext == ".cmd") &&
+		!strings.ContainsAny(name, `/\:`) &&
+		!strings.Contains(name, "..")
 }
 
 type OutputMessage struct {
@@ -60,6 +64,6 @@ type FinalMessage struct {
 	Error      string     `json:"error,omitempty"`
 	StartedAt  *time.Time `json:"startedAt,omitempty"`
 	FinishedAt *time.Time `json:"finishedAt,omitempty"`
-	DurationMS int64      `json:"durationMs,omitempty"`
+	DurationMs int64      `json:"durationMs,omitempty"`
 	Done       bool       `json:"done"`
 }
