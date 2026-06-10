@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 	"github.com/liqixin/deploy-agent/internal/executor"
 )
-
-const outputQueueSize = 128
 
 type Publisher interface {
 	Publish(ctx context.Context, topic string, payload []byte) error
@@ -40,19 +39,19 @@ func (h *Handler) Handle(ctx context.Context, payload []byte) error {
 		})
 	}
 
-	outputs := make(chan OutputMessage, outputQueueSize)
+	outputs := newOutputQueue()
 	outputErr := h.publishOutputs(ctx, cmd.ReplyTo, outputs)
 
 	res, runErr := h.exec.RunStream(ctx, cmd.Script, func(chunk executor.OutputChunk) {
-		outputs <- OutputMessage{
+		outputs.Enqueue(OutputMessage{
 			RequestID: cmd.RequestID,
 			Script:    cmd.Script,
 			Stream:    chunk.Stream,
 			Data:      chunk.Data,
 			Done:      false,
-		}
+		})
 	})
-	close(outputs)
+	outputs.Close()
 
 	var errOut error
 	if err := <-outputErr; err != nil {
@@ -66,11 +65,15 @@ func (h *Handler) Handle(ctx context.Context, payload []byte) error {
 	return errOut
 }
 
-func (h *Handler) publishOutputs(ctx context.Context, topic string, outputs <-chan OutputMessage) <-chan error {
+func (h *Handler) publishOutputs(ctx context.Context, topic string, outputs *outputQueue) <-chan error {
 	done := make(chan error, 1)
 	go func() {
 		var firstErr error
-		for msg := range outputs {
+		for {
+			msg, ok := outputs.Pop()
+			if !ok {
+				break
+			}
 			if firstErr != nil {
 				continue
 			}
@@ -81,6 +84,52 @@ func (h *Handler) publishOutputs(ctx context.Context, topic string, outputs <-ch
 		done <- firstErr
 	}()
 	return done
+}
+
+type outputQueue struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	messages []OutputMessage
+	closed   bool
+}
+
+func newOutputQueue() *outputQueue {
+	q := &outputQueue{}
+	q.cond = sync.NewCond(&q.mu)
+	return q
+}
+
+func (q *outputQueue) Enqueue(msg OutputMessage) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return
+	}
+	q.messages = append(q.messages, msg)
+	q.cond.Signal()
+}
+
+func (q *outputQueue) Close() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.closed = true
+	q.cond.Broadcast()
+}
+
+func (q *outputQueue) Pop() (OutputMessage, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for len(q.messages) == 0 && !q.closed {
+		q.cond.Wait()
+	}
+	if len(q.messages) == 0 {
+		return OutputMessage{}, false
+	}
+	msg := q.messages[0]
+	copy(q.messages, q.messages[1:])
+	q.messages[len(q.messages)-1] = OutputMessage{}
+	q.messages = q.messages[:len(q.messages)-1]
+	return msg, true
 }
 
 func resultFinalMessage(cmd Command, res executor.Result, err error) FinalMessage {

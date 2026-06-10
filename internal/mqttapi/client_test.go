@@ -198,6 +198,13 @@ func TestHandleCommandPublishesNonZeroExitWithoutError(t *testing.T) {
 func TestHandleCommandPublishesFinalAfterOutputMessages(t *testing.T) {
 	firstPublishStarted := make(chan struct{})
 	allowFirstPublish := make(chan struct{})
+	var releaseFirstPublish sync.Once
+	release := func() {
+		releaseFirstPublish.Do(func() {
+			close(allowFirstPublish)
+		})
+	}
+	defer release()
 	var once sync.Once
 	pub := &fakePublisher{
 		onPublish: func(topic string, payload []byte) {
@@ -233,7 +240,7 @@ func TestHandleCommandPublishesFinalAfterOutputMessages(t *testing.T) {
 	if got := len(pub.snapshot()); got != 0 {
 		t.Fatalf("handler published final before output drained; got %d recorded messages", got)
 	}
-	close(allowFirstPublish)
+	release()
 
 	if err := <-done; err != nil {
 		t.Fatalf("Handle returned error: %v", err)
@@ -248,6 +255,96 @@ func TestHandleCommandPublishesFinalAfterOutputMessages(t *testing.T) {
 		if out.Done {
 			t.Fatalf("message %d is final before last message: %#v", i, out)
 		}
+	}
+	var final FinalMessage
+	unmarshalPayload(t, messages[len(messages)-1].payload, &final)
+	if !final.Done {
+		t.Fatalf("last message is not final: %#v", final)
+	}
+}
+
+func TestHandleCommandDoesNotBlockRunnerCallbackWhenPublishIsSlow(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "finished.txt")
+	script := "slow-publish.bat"
+	body := "@echo off\r\n" +
+		"for /L %%i in (1,1,4000) do echo output-line-%%i-abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz\r\n" +
+		"echo done > " + marker + "\r\n"
+	if err := os.WriteFile(filepath.Join(dir, script), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := executor.New(reg, 10*time.Second)
+
+	firstPublishStarted := make(chan struct{})
+	allowFirstPublish := make(chan struct{})
+	var releaseFirstPublish sync.Once
+	release := func() {
+		releaseFirstPublish.Do(func() {
+			close(allowFirstPublish)
+		})
+	}
+	defer release()
+	var once sync.Once
+	pub := &fakePublisher{
+		onPublish: func(topic string, payload []byte) {
+			var marker struct {
+				Done bool `json:"done"`
+			}
+			if err := json.Unmarshal(payload, &marker); err != nil {
+				return
+			}
+			if !marker.Done {
+				once.Do(func() {
+					close(firstPublishStarted)
+					<-allowFirstPublish
+				})
+			}
+		},
+	}
+	handler := NewHandler(exec, pub, 1)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.Handle(context.Background(), []byte(`{"requestId":"req-1","script":"slow-publish.bat","replyTo":"deploy/replies"}`))
+	}()
+
+	select {
+	case <-firstPublishStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for output publish to start")
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Handle returned before marker was written: %v", err)
+		case <-deadline:
+			t.Fatal("script did not finish while first output publish was blocked")
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("Handle returned before slow publish was unblocked: %v", err)
+	default:
+	}
+	release()
+
+	if err := <-done; err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	messages := pub.snapshot()
+	if len(messages) < 2 {
+		t.Fatalf("published %d messages, want at least 2", len(messages))
 	}
 	var final FinalMessage
 	unmarshalPayload(t, messages[len(messages)-1].payload, &final)
