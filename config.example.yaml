@@ -2,6 +2,18 @@ server:
   host: 0.0.0.0
   port: 8080
 
+services:
+  http:
+    enabled: true
+  mqtt:
+    enabled: false
+    broker: "tcp://127.0.0.1:1883"
+    clientId: "deploy-agent"
+    username: ""
+    password: ""
+    commandTopic: "deploy-agent/run"
+    qos: 1
+
 auth:
   username: admin
   # 至少 8 位；生产环境务必改掉

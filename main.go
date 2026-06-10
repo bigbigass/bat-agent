@@ -16,7 +16,9 @@ import (
 
 	"github.com/liqixin/deploy-agent/internal/auth"
 	"github.com/liqixin/deploy-agent/internal/config"
+	"github.com/liqixin/deploy-agent/internal/executor"
 	"github.com/liqixin/deploy-agent/internal/httpapi"
+	"github.com/liqixin/deploy-agent/internal/mqttapi"
 	"github.com/liqixin/deploy-agent/internal/registry"
 )
 
@@ -61,39 +63,67 @@ func run() error {
 	go reg.WatchRescan(ctx, 60*time.Second)
 
 	timeout := time.Duration(cfg.Runner.TimeoutSeconds) * time.Second
-	api := httpapi.New(reg, timeout)
-	authWrap := func(h http.Handler) http.Handler {
-		return auth.BasicAuth(cfg.Auth.Username, cfg.Auth.Password, h)
-	}
+	exec := executor.New(reg, timeout)
 
-	addr := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           api.Routes(authWrap),
-		ReadHeaderTimeout: 10 * time.Second,
+	if cfg.Services.MQTT.Enabled {
+		mqttClient := mqttapi.NewClient(mqttConfigFromConfig(cfg), exec)
+		if err := mqttClient.Start(ctx); err != nil {
+			return fmt.Errorf("start mqtt: %w", err)
+		}
 	}
 
 	errCh := make(chan error, 1)
-	go func() {
-		log.Printf("deploy-agent listening on %s (timeout %s)", addr, timeout)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+	var srv *http.Server
+	if cfg.Services.HTTP.Enabled {
+		api := httpapi.New(exec)
+		authWrap := func(h http.Handler) http.Handler {
+			return auth.BasicAuth(cfg.Auth.Username, cfg.Auth.Password, h)
 		}
-		close(errCh)
-	}()
-
-	select {
-	case <-ctx.Done():
-		log.Printf("shutdown signal received")
-	case err := <-errCh:
-		if err != nil {
-			return err
+		addr := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
+		srv = &http.Server{
+			Addr:              addr,
+			Handler:           api.Routes(authWrap),
+			ReadHeaderTimeout: 10 * time.Second,
 		}
+		go func() {
+			log.Printf("deploy-agent http listening on %s (timeout %s)", addr, timeout)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	if err := waitForShutdown(ctx, errCh); err != nil {
+		return err
+	}
+	log.Printf("shutdown signal received")
+
+	if srv != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	}
+	return nil
+}
+
+func mqttConfigFromConfig(cfg *config.Config) mqttapi.Config {
+	return mqttapi.Config{
+		Broker:       cfg.Services.MQTT.Broker,
+		ClientID:     cfg.Services.MQTT.ClientID,
+		Username:     cfg.Services.MQTT.Username,
+		Password:     cfg.Services.MQTT.Password,
+		CommandTopic: cfg.Services.MQTT.CommandTopic,
+		QoS:          byte(cfg.Services.MQTT.QoS),
+	}
+}
+
+func waitForShutdown(ctx context.Context, errCh <-chan error) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		return err
+	}
 }
 
 // findConfig looks for config.yaml next to the executable, then in the

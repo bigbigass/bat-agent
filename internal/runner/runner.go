@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -27,10 +28,36 @@ type Result struct {
 	TimedOut   bool
 }
 
+type Stream string
+
+const (
+	StreamStdout Stream = "stdout"
+	StreamStderr Stream = "stderr"
+)
+
+type OutputChunk struct {
+	Stream Stream
+	Data   string
+}
+
+// OutputFunc receives decoded stdout/stderr chunks from RunStream. Callbacks
+// are invoked synchronously and serialized across both streams, and must return
+// promptly. Callers that publish to a network or other slow sink should enqueue
+// work and publish outside the runner callback.
+type OutputFunc func(OutputChunk)
+
 // Run executes the given .bat/.cmd script via cmd.exe and returns captured
 // output. Runs with the parent process's token, so if deploy-agent is
 // elevated the script is elevated too.
 func Run(ctx context.Context, path string, timeout time.Duration) (Result, error) {
+	return RunStream(ctx, path, timeout, nil)
+}
+
+// RunStream executes the given .bat/.cmd script via cmd.exe, captures output,
+// and optionally streams stdout/stderr chunks as they are written. Output
+// callbacks are invoked synchronously and serialized across both streams, so a
+// slow callback can block script output processing.
+func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput OutputFunc) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -39,10 +66,13 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 
 	stdoutBuf := &cappedBuffer{limit: maxOutputBytes}
 	stderrBuf := &cappedBuffer{limit: maxOutputBytes}
-	cmd.Stdout = stdoutBuf
-	cmd.Stderr = stderrBuf
+	emit := serializedOutputFunc(onOutput)
+	stdoutWriter := &streamCaptureWriter{capture: stdoutBuf, stream: StreamStdout, onOutput: emit}
+	stderrWriter := &streamCaptureWriter{capture: stderrBuf, stream: StreamStderr, onOutput: emit}
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
 
-	res := Result{StartedAt: time.Now()}
+	res := Result{ExitCode: -1, StartedAt: time.Now()}
 
 	err := cmd.Start()
 	if err != nil {
@@ -51,6 +81,8 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 	}
 
 	waitErr := cmd.Wait()
+	stdoutWriter.Flush()
+	stderrWriter.Flush()
 	res.FinishedAt = time.Now()
 
 	if ctx.Err() == context.DeadlineExceeded {
@@ -65,6 +97,10 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 	res.Stdout = decodeOutput(stdoutBuf.Bytes())
 	res.Stderr = decodeOutput(stderrBuf.Bytes())
 
+	if res.TimedOut {
+		return res, nil
+	}
+
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) {
@@ -75,6 +111,119 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 	}
 	res.ExitCode = 0
 	return res, nil
+}
+
+func serializedOutputFunc(onOutput OutputFunc) OutputFunc {
+	if onOutput == nil {
+		return nil
+	}
+	var mu sync.Mutex
+	return func(chunk OutputChunk) {
+		mu.Lock()
+		defer mu.Unlock()
+		onOutput(chunk)
+	}
+}
+
+type streamCaptureWriter struct {
+	capture  *cappedBuffer
+	stream   Stream
+	onOutput OutputFunc
+	pending  []byte
+}
+
+func (w *streamCaptureWriter) Write(p []byte) (int, error) {
+	if _, err := w.capture.Write(p); err != nil {
+		return 0, err
+	}
+	if w.onOutput != nil {
+		w.emit(p)
+	}
+	return len(p), nil
+}
+
+func (w *streamCaptureWriter) Flush() {
+	if len(w.pending) == 0 || w.onOutput == nil {
+		w.pending = nil
+		return
+	}
+	w.onOutput(OutputChunk{Stream: w.stream, Data: decodeOutput(w.pending)})
+	w.pending = nil
+}
+
+func (w *streamCaptureWriter) emit(p []byte) {
+	b := append(w.pending, p...)
+	w.pending = nil
+
+	complete, pending, ok := splitUTF8Complete(b)
+	if ok {
+		w.pending = append(w.pending, pending...)
+		if len(complete) > 0 {
+			w.onOutput(OutputChunk{Stream: w.stream, Data: string(complete)})
+		}
+		return
+	}
+
+	complete, pending = splitGBKComplete(b)
+	w.pending = append(w.pending, pending...)
+	if len(complete) > 0 {
+		w.onOutput(OutputChunk{Stream: w.stream, Data: decodeOutput(complete)})
+	}
+}
+
+func splitUTF8Complete(b []byte) (complete []byte, pending []byte, ok bool) {
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size == 1 {
+			if utf8SequenceSize(b[i]) > len(b)-i {
+				return b[:i], b[i:], true
+			}
+			return nil, nil, false
+		}
+		i += size
+	}
+	return b, nil, true
+}
+
+func utf8SequenceSize(b byte) int {
+	switch {
+	case b < 0x80:
+		return 1
+	case b >= 0xC2 && b <= 0xDF:
+		return 2
+	case b >= 0xE0 && b <= 0xEF:
+		return 3
+	case b >= 0xF0 && b <= 0xF4:
+		return 4
+	default:
+		return 0
+	}
+}
+
+func splitGBKComplete(b []byte) (complete []byte, pending []byte) {
+	for i := 0; i < len(b); {
+		if b[i] <= 0x7F {
+			i++
+			continue
+		}
+		if isGBKLeadByte(b[i]) && i+1 >= len(b) {
+			return b[:i], b[i:]
+		}
+		if isGBKLeadByte(b[i]) && isGBKTrailByte(b[i+1]) {
+			i += 2
+			continue
+		}
+		i++
+	}
+	return b, nil
+}
+
+func isGBKLeadByte(b byte) bool {
+	return b >= 0x81 && b <= 0xFE
+}
+
+func isGBKTrailByte(b byte) bool {
+	return b >= 0x40 && b <= 0xFE && b != 0x7F
 }
 
 // killTree uses taskkill to terminate the pid and all descendants.
