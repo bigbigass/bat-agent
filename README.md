@@ -39,6 +39,10 @@ auth:
 runner:
   timeoutSeconds: 300               # 单脚本超时
   scriptDir: ""                     # 留空 = exe 所在目录
+preRun:
+  download:
+    script: "tools/download_simple.bat"
+    timeoutSeconds: 300
 ```
 
 `config.yaml` 优先从 exe 同目录读，没有则从当前工作目录读。
@@ -52,6 +56,22 @@ runner:
 - 至少需要启用 HTTP 或 MQTT 中的一种。
 - MQTT `broker` 支持 `tcp://` 和 `ssl://`。
 - MQTT 鉴权依赖 broker 的账号、密码、TLS 和 ACL；`auth` 里的 Basic Auth 只用于 HTTP。
+
+### 前置下载
+
+GUI 可以在执行脚本前勾选“执行前下载”。勾选后需要填写项目编号和产物文件名，服务端会先执行 `preRun.download.script`：
+
+```cmd
+download_simple.bat <项目编号> <产物文件名>
+```
+
+下载脚本按固定远端路径获取产物：
+
+```text
+/交付产物/<项目编号>/<产物文件名>
+```
+
+下载成功后才会执行目标脚本；下载失败或超时时不会执行目标脚本。`preRun.download.script` 相对路径基于 `config.yaml` 所在目录解析。`tools/cookie.ini` 是本机凭据文件，不要提交或分享。
 
 ## 运行
 
@@ -86,6 +106,20 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 ```json
 {"script": "deploy.bat"}
 ```
+
+也可以请求执行前下载；省略 `preDownload` 时保持旧行为：
+
+```json
+{
+  "script": "deploy.bat",
+  "preDownload": {
+    "enabled": true,
+    "project": "ProjectA",
+    "artifact": "app.zip"
+  }
+}
+```
+
 响应（200）：
 ```json
 {
@@ -110,12 +144,31 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 | 500 | 启动进程失败 |
 | 504 | 执行超时，返回体 `timedOut: true` |
 
+前置下载相关错误：
+
+- `preDownload` 参数非法时返回 400，错误文本为 `invalid pre-run download request`。
+- 下载超时时返回超时结果，响应体 `timedOut: true`，`/run` 返回 504。
+- 下载失败时返回 `pre-run download failed`，不会执行目标脚本。
+
 ### `POST /run/stream`
 
 需要 Basic Auth。请求体与 `/run` 一致：
 
 ```json
 {"script":"deploy.bat"}
+```
+
+也可以请求执行前下载；省略 `preDownload` 时保持旧行为：
+
+```json
+{
+  "script": "deploy.bat",
+  "preDownload": {
+    "enabled": true,
+    "project": "ProjectA",
+    "artifact": "app.zip"
+  }
+}
 ```
 
 响应是 NDJSON，每一行一个 JSON：
@@ -127,6 +180,8 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 ```
 
 一旦进入流式响应，HTTP 状态码保持 `200`。脚本超时、非零退出码或 runner 错误通过最后一条 `type: "final"` 判断。调度前错误仍返回普通 JSON 错误和对应 HTTP 状态码。
+
+前置下载参数非法时，调度前返回 400 和 `invalid pre-run download request`。下载超时会在最终消息里返回超时结果（`timedOut: true`）；下载失败会在最终消息里返回 `pre-run download failed`，不会执行目标脚本。
 
 ## MQTT API
 

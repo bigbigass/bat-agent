@@ -24,3 +24,11 @@ runner:
   timeoutSeconds: 300
   # bat 脚本所在目录；留空 = deploy-agent.exe 所在目录
   scriptDir: ""
+
+preRun:
+  download:
+    # 执行脚本前的下载工具；留空 = 禁用前置下载
+    # 相对路径基于 config.yaml 所在目录解析
+    script: "tools/download_simple.bat"
+    # 下载步骤最大执行时间（秒）
+    timeoutSeconds: 300
