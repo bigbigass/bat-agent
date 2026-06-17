@@ -37,6 +37,21 @@ type StreamEvent struct {
 	Error      string    `json:"error,omitempty"`
 }
 
+type RunStreamOptions struct {
+	PreDownload PreDownloadOptions
+}
+
+type PreDownloadOptions struct {
+	Enabled  bool   `json:"enabled"`
+	Project  string `json:"project"`
+	Artifact string `json:"artifact"`
+}
+
+type runStreamRequest struct {
+	Script      string              `json:"script"`
+	PreDownload *PreDownloadOptions `json:"preDownload,omitempty"`
+}
+
 type HTTPError struct {
 	StatusCode int
 	Message    string
@@ -98,7 +113,16 @@ func (c *Client) Scripts(ctx context.Context) ([]string, error) {
 }
 
 func (c *Client) RunStream(ctx context.Context, script string, onEvent func(StreamEvent)) error {
-	body, err := json.Marshal(map[string]string{"script": script})
+	return c.RunStreamWithOptions(ctx, script, RunStreamOptions{}, onEvent)
+}
+
+func (c *Client) RunStreamWithOptions(ctx context.Context, script string, opts RunStreamOptions, onEvent func(StreamEvent)) error {
+	reqBody := runStreamRequest{Script: script}
+	if opts.PreDownload.Enabled {
+		preDownload := opts.PreDownload
+		reqBody.PreDownload = &preDownload
+	}
+	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}

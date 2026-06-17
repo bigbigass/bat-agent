@@ -76,6 +76,13 @@ func TestRunStreamReadsOutputAndFinal(t *testing.T) {
 		if body.Script != "a.bat" {
 			t.Fatalf("script = %q, want a.bat", body.Script)
 		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("request body is not JSON object: %v", err)
+		}
+		if _, ok := raw["preDownload"]; ok {
+			t.Fatalf("RunStream request included preDownload key: %s", string(data))
+		}
 		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 		fmt.Fprintln(w, `{"type":"output","script":"a.bat","stream":"stdout","data":"hello\r\n"}`)
 		fmt.Fprintln(w, `{"type":"final","script":"a.bat","exitCode":0,"timedOut":false,"startedAt":"2026-06-10T10:00:00+08:00","finishedAt":"2026-06-10T10:00:01+08:00","durationMs":1000}`)
@@ -98,6 +105,43 @@ func TestRunStreamReadsOutputAndFinal(t *testing.T) {
 	}
 	if events[1].Type != EventFinal || events[1].ExitCode != 0 || events[1].TimedOut {
 		t.Fatalf("unexpected final event: %#v", events[1])
+	}
+}
+
+func TestRunStreamWithOptionsSendsPreDownload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll body returned error: %v", err)
+		}
+		var body struct {
+			Script      string `json:"script"`
+			PreDownload struct {
+				Enabled  bool   `json:"enabled"`
+				Project  string `json:"project"`
+				Artifact string `json:"artifact"`
+			} `json:"preDownload"`
+		}
+		if err := json.Unmarshal(data, &body); err != nil {
+			t.Fatalf("request body is not JSON: %v", err)
+		}
+		if body.Script != "deploy.bat" {
+			t.Fatalf("script = %q, want deploy.bat", body.Script)
+		}
+		if !body.PreDownload.Enabled || body.PreDownload.Project != "ProjectA" || body.PreDownload.Artifact != "app.zip" {
+			t.Fatalf("preDownload = %#v", body.PreDownload)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		fmt.Fprintln(w, `{"type":"final","script":"deploy.bat","exitCode":0,"timedOut":false}`)
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "admin", "password")
+	err := client.RunStreamWithOptions(context.Background(), "deploy.bat", RunStreamOptions{
+		PreDownload: PreDownloadOptions{Enabled: true, Project: "ProjectA", Artifact: "app.zip"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("RunStreamWithOptions returned error: %v", err)
 	}
 }
 
