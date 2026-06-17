@@ -276,8 +276,9 @@ func TestRunStreamWithOptionsSkipsTargetWhenDownloadFails(t *testing.T) {
 
 func TestRunStreamWithOptionsReportsDownloadTimeout(t *testing.T) {
 	dir := t.TempDir()
-	download := writeScript(t, dir, "download.bat", "@echo off\r\necho before timeout\r\nping -n 3 127.0.0.1 >nul\r\n")
-	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target\r\n")
+	marker := filepath.Join(dir, "target-ran.txt")
+	download := writeScript(t, dir, "download.bat", "@echo off\r\nping -n 3 127.0.0.1 >nul\r\n")
+	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target > "+marker+"\r\n")
 	reg, err := registry.New(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -297,8 +298,8 @@ func TestRunStreamWithOptionsReportsDownloadTimeout(t *testing.T) {
 	if !res.TimedOut {
 		t.Fatal("TimedOut = false, want true")
 	}
-	if !strings.Contains(res.Stdout, "before timeout") {
-		t.Fatalf("Stdout = %q, want download timeout output", res.Stdout)
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("target marker stat error = %v, want not exist", statErr)
 	}
 }
 
