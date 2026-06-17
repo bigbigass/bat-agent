@@ -41,8 +41,8 @@ runner:
   scriptDir: ""                     # 留空 = exe 所在目录
 preRun:
   download:
-    script: "tools/download_simple.bat"
-    timeoutSeconds: 300
+    script: "tools/download_simple.bat" # 示例：部署目录中自行提供；留空 = 禁用
+    timeoutSeconds: 300                 # 仅前置下载超时
 ```
 
 `config.yaml` 优先从 exe 同目录读，没有则从当前工作目录读。
@@ -71,7 +71,9 @@ download_simple.bat <项目编号> <产物文件名>
 /交付产物/<项目编号>/<产物文件名>
 ```
 
-下载成功后才会执行目标脚本；下载失败或超时时不会执行目标脚本。`preRun.download.script` 相对路径基于 `config.yaml` 所在目录解析。`tools/cookie.ini` 是本机凭据文件，不要提交或分享。
+下载成功后才会执行目标脚本；下载失败或超时时不会执行目标脚本。`preRun.download.script` 为空时禁用前置下载；如果客户端请求前置下载但服务端未配置脚本，会返回 `pre-run download is not configured`。`preRun.download.timeoutSeconds` 只作用于下载步骤，不影响目标脚本的 `runner.timeoutSeconds`。
+
+`tools/download_simple.bat` 只是示例路径，不是程序内置文件。部署时需要在 `config.yaml` 所在目录下自行提供该脚本，以及脚本依赖的工具和凭据（例如 `BaiduPCS-Go.exe`、`tools/cookie.ini`）。`preRun.download.script` 相对路径基于 `config.yaml` 所在目录解析。`tools/cookie.ini` 是本机凭据文件，不要提交或分享。
 
 ## 运行
 
@@ -147,6 +149,7 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 前置下载相关错误：
 
 - `preDownload` 参数非法时返回 400，错误文本为 `invalid pre-run download request`。
+- 请求前置下载但服务端未配置脚本时返回 `pre-run download is not configured`，不会执行目标脚本。
 - 下载超时时返回超时结果，响应体 `timedOut: true`，`/run` 返回 504。
 - 下载失败时返回 `pre-run download failed`，不会执行目标脚本。
 
@@ -181,7 +184,7 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 
 一旦进入流式响应，HTTP 状态码保持 `200`。脚本超时、非零退出码或 runner 错误通过最后一条 `type: "final"` 判断。调度前错误仍返回普通 JSON 错误和对应 HTTP 状态码。
 
-前置下载参数非法时，调度前返回 400 和 `invalid pre-run download request`。下载超时会在最终 NDJSON 消息里同时返回 `timedOut: true` 和 `error: "pre-run download timed out"`；下载失败会在最终消息里返回 `pre-run download failed`，不会执行目标脚本。
+前置下载参数非法时，调度前返回 400 和 `invalid pre-run download request`。请求前置下载但服务端未配置脚本时，最终消息会返回 `pre-run download is not configured`，不会执行目标脚本。下载超时会在最终 NDJSON 消息里同时返回 `timedOut: true` 和 `error: "pre-run download timed out"`；下载失败会在最终消息里返回 `pre-run download failed`，不会执行目标脚本。
 
 ## MQTT API
 

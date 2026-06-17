@@ -28,7 +28,8 @@ runner:
 preRun:
   download:
     # 执行脚本前的下载工具；留空 = 禁用前置下载
+    # 示例路径不是内置文件；请在部署目录自行提供该脚本及所需工具/凭据
     # 相对路径基于 config.yaml 所在目录解析
     script: "tools/download_simple.bat"
-    # 下载步骤最大执行时间（秒）
+    # 下载步骤最大执行时间（秒），只作用于前置下载
     timeoutSeconds: 300
