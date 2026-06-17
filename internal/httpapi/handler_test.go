@@ -83,6 +83,13 @@ func postRun(script string) *http.Request {
 	return req
 }
 
+func postRunBody(body string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", authHeader())
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
 func postRunStream(script string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/run/stream", bytes.NewBufferString(`{"script":`+quoteJSON(script)+`}`))
 	req.Header.Set("Authorization", authHeader())
@@ -253,6 +260,15 @@ func TestRunInvalidScriptReturns400(t *testing.T) {
 	server.handler.ServeHTTP(rec, postRun(`..\evil.bat`))
 
 	assertErrorResponse(t, rec, http.StatusBadRequest, "invalid script name")
+}
+
+func TestRunRejectsInvalidPreDownloadRequest(t *testing.T) {
+	server := makeServer(t, map[string]string{"deploy.bat": "@echo off\r\necho deploy\r\n"})
+	rec := httptest.NewRecorder()
+
+	server.handler.ServeHTTP(rec, postRunBody(`{"script":"deploy.bat","preDownload":{"enabled":true,"project":"..","artifact":"app.zip"}}`))
+
+	assertErrorResponse(t, rec, http.StatusBadRequest, "invalid pre-run download request")
 }
 
 func TestRunBusyReturns409(t *testing.T) {
@@ -509,6 +525,49 @@ func TestRunStreamTimeoutReturnsFinalOverHTTP200(t *testing.T) {
 	}
 	if rawString(t, final, "error") != "script timed out" {
 		t.Fatalf("error = %q, want script timed out", rawString(t, final, "error"))
+	}
+}
+
+func TestRunStreamWithPreDownloadStreamsDownloadBeforeTarget(t *testing.T) {
+	dir := t.TempDir()
+	download := filepath.Join(dir, "download.bat")
+	if err := os.WriteFile(download, []byte("@echo off\r\necho download %~1 %~2\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deploy.bat"), []byte("@echo off\r\necho target\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := registry.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := executor.New(reg, 5*time.Second, executor.WithPreDownloadConfig(executor.PreDownloadConfig{
+		ScriptPath: download,
+		Timeout:    5 * time.Second,
+	}))
+	api := New(exec)
+	handler := api.Routes(func(h http.Handler) http.Handler {
+		return auth.BasicAuth("admin", "change-me-please", h)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/run/stream", bytes.NewBufferString(`{"script":"deploy.bat","preDownload":{"enabled":true,"project":"ProjectA","artifact":"app.zip"}}`))
+	req.Header.Set("Authorization", authHeader())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "download ProjectA app.zip") {
+		t.Fatalf("body = %s, want download output", body)
+	}
+	if !strings.Contains(body, "target") {
+		t.Fatalf("body = %s, want target output", body)
+	}
+	if strings.Index(body, "download") > strings.Index(body, "target") {
+		t.Fatalf("body = %s, want download output before target output", body)
 	}
 }
 

@@ -41,7 +41,14 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 }
 
 type runRequest struct {
-	Script string `json:"script"`
+	Script      string              `json:"script"`
+	PreDownload *preDownloadRequest `json:"preDownload,omitempty"`
+}
+
+type preDownloadRequest struct {
+	Enabled  bool   `json:"enabled"`
+	Project  string `json:"project"`
+	Artifact string `json:"artifact"`
 }
 
 type runResponse struct {
@@ -79,6 +86,19 @@ type streamRunResult struct {
 	err    error
 }
 
+func runOptionsFromRequest(req runRequest) executor.RunOptions {
+	if req.PreDownload == nil {
+		return executor.RunOptions{}
+	}
+	return executor.RunOptions{
+		PreDownload: executor.PreDownloadRequest{
+			Enabled:  req.PreDownload.Enabled,
+			Project:  req.PreDownload.Project,
+			Artifact: req.PreDownload.Artifact,
+		},
+	}
+}
+
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -89,10 +109,13 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
-	result, err := s.exec.RunCollect(context.Background(), req.Script)
+	result, err := s.exec.RunCollectWithOptions(context.Background(), req.Script, runOptionsFromRequest(req))
 	if err != nil {
 		switch {
 		case errors.Is(err, executor.ErrInvalidScriptName):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
+			return
+		case errors.Is(err, executor.ErrInvalidPreDownloadRequest):
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
 			return
 		case errors.Is(err, executor.ErrScriptNotFound):
@@ -143,7 +166,7 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 	outputs := make(chan streamOutputResponse, 64)
 	done := make(chan streamRunResult, 1)
 	go func() {
-		result, err := s.exec.RunStream(context.Background(), req.Script, func(chunk executor.OutputChunk) {
+		result, err := s.exec.RunStreamWithOptions(context.Background(), req.Script, runOptionsFromRequest(req), func(chunk executor.OutputChunk) {
 			outputs <- streamOutputResponse{
 				Type:   "output",
 				Script: req.Script,
@@ -230,6 +253,9 @@ func writeStreamOutputs(w http.ResponseWriter, enc *json.Encoder, outputs <-chan
 func writePreflightStreamError(w http.ResponseWriter, result executor.Result, err error) bool {
 	switch {
 	case errors.Is(err, executor.ErrInvalidScriptName):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
+		return true
+	case errors.Is(err, executor.ErrInvalidPreDownloadRequest):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
 		return true
 	case errors.Is(err, executor.ErrScriptNotFound):
