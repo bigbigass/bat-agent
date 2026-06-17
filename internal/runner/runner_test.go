@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,6 +120,63 @@ func TestRunStreamWithArgsPassesShellSensitiveArgumentsLiterally(t *testing.T) {
 	}
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("marker file exists or stat failed unexpectedly: %v", err)
+	}
+}
+
+func TestRunStreamWithArgsRejectsUnsafeBatchArguments(t *testing.T) {
+	tempDir := t.TempDir()
+	markerPath := filepath.Join(tempDir, "marker.txt")
+	scriptPath := writeBatch(t, strings.Join([]string{
+		"@echo off",
+		"echo target-started",
+		"",
+	}, "\r\n"))
+
+	tests := []struct {
+		name string
+		arg  string
+	}{
+		{
+			name: "double quote injection",
+			arg:  `safe" & echo injected > ` + markerPath + ` & rem "`,
+		},
+		{
+			name: "carriage return",
+			arg:  "safe\rvalue",
+		},
+		{
+			name: "line feed",
+			arg:  "safe\nvalue",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_ = os.Remove(markerPath)
+
+			res, err := RunStreamWithArgs(context.Background(), scriptPath, []string{tt.arg}, 5*time.Second, nil)
+			if !errors.Is(err, ErrInvalidScriptArgument) {
+				t.Fatalf("error = %v, want ErrInvalidScriptArgument", err)
+			}
+			if res.ExitCode != -1 {
+				t.Fatalf("ExitCode = %d, want -1", res.ExitCode)
+			}
+			if res.StartedAt.IsZero() {
+				t.Fatal("StartedAt is zero")
+			}
+			if res.FinishedAt.IsZero() {
+				t.Fatal("FinishedAt is zero")
+			}
+			if res.Stdout != "" {
+				t.Fatalf("Stdout = %q, want empty", res.Stdout)
+			}
+			if res.Stderr != "" {
+				t.Fatalf("Stderr = %q, want empty", res.Stderr)
+			}
+			if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+				t.Fatalf("marker file exists or stat failed unexpectedly: %v", err)
+			}
+		})
 	}
 }
 

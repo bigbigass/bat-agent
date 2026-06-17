@@ -21,6 +21,8 @@ import (
 
 const maxOutputBytes = 1 << 20 // 1 MiB per stream
 
+var ErrInvalidScriptArgument = errors.New("invalid script argument")
+
 type Result struct {
 	ExitCode   int
 	Stdout     string
@@ -64,7 +66,8 @@ func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput
 }
 
 // RunStreamWithArgs executes the given .bat/.cmd script with literal script
-// arguments, captures output, and optionally streams stdout/stderr chunks.
+// arguments, captures output, and optionally streams stdout/stderr chunks. It
+// rejects arguments that cannot be safely represented for batch invocation.
 func RunStreamWithArgs(ctx context.Context, path string, scriptArgs []string, timeout time.Duration, onOutput OutputFunc) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -131,6 +134,9 @@ func batchCommand(ctx context.Context, path string, scriptArgs []string) (*exec.
 	if len(scriptArgs) == 0 {
 		return exec.CommandContext(ctx, "cmd.exe", "/c", path), nil, nil
 	}
+	if err := validateScriptArgs(scriptArgs); err != nil {
+		return nil, nil, err
+	}
 
 	wrapperPath, err := writeArgsWrapper(path, len(scriptArgs))
 	if err != nil {
@@ -142,6 +148,15 @@ func batchCommand(ctx context.Context, path string, scriptArgs []string) (*exec.
 		cmd.Env = append(cmd.Env, runnerArgName(i)+"="+escapeExpandedBatchArg(arg))
 	}
 	return cmd, func() { _ = os.Remove(wrapperPath) }, nil
+}
+
+func validateScriptArgs(scriptArgs []string) error {
+	for _, arg := range scriptArgs {
+		if strings.ContainsAny(arg, "\"\r\n") {
+			return ErrInvalidScriptArgument
+		}
+	}
+	return nil
 }
 
 func writeArgsWrapper(path string, argCount int) (string, error) {
