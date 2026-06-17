@@ -181,7 +181,7 @@ HTTP 是同步最终结果模式：`POST /run` 会等脚本执行结束后一次
 
 一旦进入流式响应，HTTP 状态码保持 `200`。脚本超时、非零退出码或 runner 错误通过最后一条 `type: "final"` 判断。调度前错误仍返回普通 JSON 错误和对应 HTTP 状态码。
 
-前置下载参数非法时，调度前返回 400 和 `invalid pre-run download request`。下载超时会在最终消息里返回超时结果（`timedOut: true`）；下载失败会在最终消息里返回 `pre-run download failed`，不会执行目标脚本。
+前置下载参数非法时，调度前返回 400 和 `invalid pre-run download request`。下载超时会在最终 NDJSON 消息里同时返回 `timedOut: true` 和 `error: "pre-run download timed out"`；下载失败会在最终消息里返回 `pre-run download failed`，不会执行目标脚本。
 
 ## MQTT API
 
