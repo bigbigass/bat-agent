@@ -17,15 +17,23 @@ func makeRegistry(t *testing.T, files map[string]string) *registry.Registry {
 
 	dir := t.TempDir()
 	for name, body := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writeScript(t, dir, name, body)
 	}
 	reg, err := registry.New(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return reg
+}
+
+func writeScript(t *testing.T, dir, name, body string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestRunCollectRejectsInvalidScriptName(t *testing.T) {
@@ -198,5 +206,139 @@ func TestRunCollectNonZeroExitCodeReturnsResultWithoutError(t *testing.T) {
 	}
 	if res.ExitCode != 7 {
 		t.Fatalf("ExitCode = %d, want 7", res.ExitCode)
+	}
+}
+
+func TestRunStreamWithOptionsRunsDownloadBeforeTarget(t *testing.T) {
+	dir := t.TempDir()
+	download := writeScript(t, dir, "download.bat", "@echo off\r\necho download %~1 %~2\r\n")
+	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target\r\n")
+	reg, err := registry.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := New(reg, 5*time.Second, WithPreDownloadConfig(PreDownloadConfig{
+		ScriptPath: download,
+		Timeout:    5 * time.Second,
+	}))
+
+	res, err := exec.RunStreamWithOptions(context.Background(), "deploy.bat", RunOptions{
+		PreDownload: PreDownloadRequest{Enabled: true, Project: "ProjectA", Artifact: "app.zip"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("RunStreamWithOptions returned error: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "download ProjectA app.zip") {
+		t.Fatalf("Stdout = %q, want download output", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "target") {
+		t.Fatalf("Stdout = %q, want target output", res.Stdout)
+	}
+	if strings.Index(res.Stdout, "download") > strings.Index(res.Stdout, "target") {
+		t.Fatalf("Stdout = %q, want download before target", res.Stdout)
+	}
+}
+
+func TestRunStreamWithOptionsSkipsTargetWhenDownloadFails(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "target-ran.txt")
+	download := writeScript(t, dir, "download.bat", "@echo off\r\necho download failed\r\nexit /b 5\r\n")
+	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target > "+marker+"\r\n")
+	reg, err := registry.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := New(reg, 5*time.Second, WithPreDownloadConfig(PreDownloadConfig{
+		ScriptPath: download,
+		Timeout:    5 * time.Second,
+	}))
+
+	res, err := exec.RunStreamWithOptions(context.Background(), "deploy.bat", RunOptions{
+		PreDownload: PreDownloadRequest{Enabled: true, Project: "ProjectA", Artifact: "app.zip"},
+	}, nil)
+
+	if !errors.Is(err, ErrPreDownloadFailed) {
+		t.Fatalf("expected ErrPreDownloadFailed, got %v", err)
+	}
+	if res.ExitCode != 5 {
+		t.Fatalf("ExitCode = %d, want download exit code 5", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "download failed") {
+		t.Fatalf("Stdout = %q, want download output", res.Stdout)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("target marker stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestRunStreamWithOptionsReportsDownloadTimeout(t *testing.T) {
+	dir := t.TempDir()
+	download := writeScript(t, dir, "download.bat", "@echo off\r\necho before timeout\r\nping -n 3 127.0.0.1 >nul\r\n")
+	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target\r\n")
+	reg, err := registry.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := New(reg, 5*time.Second, WithPreDownloadConfig(PreDownloadConfig{
+		ScriptPath: download,
+		Timeout:    100 * time.Millisecond,
+	}))
+
+	res, err := exec.RunStreamWithOptions(context.Background(), "deploy.bat", RunOptions{
+		PreDownload: PreDownloadRequest{Enabled: true, Project: "ProjectA", Artifact: "app.zip"},
+	}, nil)
+
+	if !errors.Is(err, ErrPreDownloadTimedOut) {
+		t.Fatalf("expected ErrPreDownloadTimedOut, got %v", err)
+	}
+	if !res.TimedOut {
+		t.Fatal("TimedOut = false, want true")
+	}
+	if !strings.Contains(res.Stdout, "before timeout") {
+		t.Fatalf("Stdout = %q, want download timeout output", res.Stdout)
+	}
+}
+
+func TestRunStreamWithOptionsKeepsTargetLockDuringDownload(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "download-started.txt")
+	download := writeScript(t, dir, "download.bat", "@echo off\r\necho started > "+started+"\r\nping -n 3 127.0.0.1 >nul\r\n")
+	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target\r\n")
+	reg, err := registry.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := New(reg, 5*time.Second, WithPreDownloadConfig(PreDownloadConfig{ScriptPath: download, Timeout: 5 * time.Second}))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := exec.RunStreamWithOptions(context.Background(), "deploy.bat", RunOptions{PreDownload: PreDownloadRequest{Enabled: true, Project: "ProjectA", Artifact: "app.zip"}}, nil)
+		done <- err
+	}()
+
+	deadline := time.After(3 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("first run finished before download marker: %v", err)
+		case <-deadline:
+			t.Fatal("timed out waiting for download marker")
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+
+	_, err = exec.RunStreamWithOptions(context.Background(), "deploy.bat", RunOptions{PreDownload: PreDownloadRequest{Enabled: true, Project: "ProjectB", Artifact: "other.zip"}}, nil)
+	if !errors.Is(err, ErrScriptBusy) {
+		t.Fatalf("expected ErrScriptBusy while first run is downloading, got %v", err)
+	}
+
+	if err := <-done; err != nil {
+		t.Fatalf("first run returned error: %v", err)
 	}
 }

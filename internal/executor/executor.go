@@ -112,8 +112,19 @@ func (e *Executor) RunStreamWithOptions(ctx context.Context, script string, opts
 	}
 	defer entry.Unlock()
 
+	var preResult Result
+	if preDownload.Enabled {
+		preResult, err = e.runPreDownload(ctx, entry.Name, preDownload, onOutput)
+		if err != nil {
+			return preResult, err
+		}
+	}
+
 	res, err := runner.RunStream(ctx, entry.Path, e.timeout, adaptOutputFunc(onOutput))
 	out := resultFromRunner(entry.Name, res)
+	if preDownload.Enabled {
+		out = mergeResults(entry.Name, preResult, out)
+	}
 	if res.TimedOut {
 		return out, ErrScriptTimedOut
 	}
@@ -136,6 +147,40 @@ func validatePreDownload(req PreDownloadRequest) (PreDownloadRequest, error) {
 		return req, ErrInvalidPreDownloadRequest
 	}
 	return req, nil
+}
+
+func (e *Executor) runPreDownload(ctx context.Context, script string, req PreDownloadRequest, onOutput OutputFunc) (Result, error) {
+	res, err := runner.RunStreamWithArgs(ctx, e.preDownload.ScriptPath, []string{req.Project, req.Artifact}, e.preDownload.Timeout, adaptOutputFunc(onOutput))
+	out := resultFromRunner(script, res)
+	if res.TimedOut {
+		return out, ErrPreDownloadTimedOut
+	}
+	if err != nil {
+		return out, preDownloadStartError{err: err}
+	}
+	if res.ExitCode != 0 {
+		return out, ErrPreDownloadFailed
+	}
+	return out, nil
+}
+
+func mergeResults(script string, pre Result, target Result) Result {
+	return Result{
+		Script:     script,
+		ExitCode:   target.ExitCode,
+		Stdout:     pre.Stdout + target.Stdout,
+		Stderr:     pre.Stderr + target.Stderr,
+		StartedAt:  firstTime(pre.StartedAt, target.StartedAt),
+		FinishedAt: target.FinishedAt,
+		TimedOut:   target.TimedOut,
+	}
+}
+
+func firstTime(a, b time.Time) time.Time {
+	if !a.IsZero() {
+		return a
+	}
+	return b
 }
 
 func unsafeDownloadValue(value string) bool {
@@ -216,4 +261,20 @@ func (e runnerStartError) Unwrap() error {
 
 func (e runnerStartError) Is(target error) bool {
 	return target == ErrRunnerStart
+}
+
+type preDownloadStartError struct {
+	err error
+}
+
+func (e preDownloadStartError) Error() string {
+	return ErrPreDownloadFailed.Error() + ": " + e.err.Error()
+}
+
+func (e preDownloadStartError) Unwrap() error {
+	return e.err
+}
+
+func (e preDownloadStartError) Is(target error) bool {
+	return target == ErrPreDownloadFailed
 }
