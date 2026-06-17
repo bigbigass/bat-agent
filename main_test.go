@@ -3,11 +3,45 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/liqixin/deploy-agent/internal/config"
 	"github.com/liqixin/deploy-agent/internal/mqttapi"
 )
+
+func TestExecutorOptionsFromConfigMapsPreRunDownload(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := &config.Config{
+		PreRun: config.PreRunConfig{
+			Download: config.PreRunDownloadConfig{
+				Script:         "tools/download_simple.bat",
+				TimeoutSeconds: 123,
+			},
+		},
+	}
+
+	opts, err := executorOptionsFromConfig(cfg, cfgPath)
+	if err != nil {
+		t.Fatalf("executorOptionsFromConfig returned error: %v", err)
+	}
+	if len(opts) != 1 {
+		t.Fatalf("options len = %d, want 1", len(opts))
+	}
+}
+
+func TestExecutorOptionsFromConfigSkipsEmptyPreRunDownload(t *testing.T) {
+	cfg := &config.Config{}
+
+	opts, err := executorOptionsFromConfig(cfg, filepath.Join(t.TempDir(), "config.yaml"))
+	if err != nil {
+		t.Fatalf("executorOptionsFromConfig returned error: %v", err)
+	}
+	if len(opts) != 0 {
+		t.Fatalf("options len = %d, want 0", len(opts))
+	}
+}
 
 func TestMQTTConfigFromConfigMapsServiceFields(t *testing.T) {
 	cfg := &config.Config{

@@ -63,7 +63,11 @@ func run() error {
 	go reg.WatchRescan(ctx, 60*time.Second)
 
 	timeout := time.Duration(cfg.Runner.TimeoutSeconds) * time.Second
-	exec := executor.New(reg, timeout)
+	execOptions, err := executorOptionsFromConfig(cfg, cfgPath)
+	if err != nil {
+		return err
+	}
+	exec := executor.New(reg, timeout, execOptions...)
 
 	if cfg.Services.MQTT.Enabled {
 		mqttClient := mqttapi.NewClient(mqttConfigFromConfig(cfg), exec)
@@ -115,6 +119,22 @@ func mqttConfigFromConfig(cfg *config.Config) mqttapi.Config {
 		CommandTopic: cfg.Services.MQTT.CommandTopic,
 		QoS:          byte(cfg.Services.MQTT.QoS),
 	}
+}
+
+func executorOptionsFromConfig(cfg *config.Config, cfgPath string) ([]executor.Option, error) {
+	downloadScript, err := cfg.ResolvePreRunDownloadScript(cfgPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve preRun.download.script: %w", err)
+	}
+	if downloadScript == "" {
+		return nil, nil
+	}
+	return []executor.Option{
+		executor.WithPreDownloadConfig(executor.PreDownloadConfig{
+			ScriptPath: downloadScript,
+			Timeout:    time.Duration(cfg.PreRun.Download.TimeoutSeconds) * time.Second,
+		}),
+	}, nil
 }
 
 func waitForShutdown(ctx context.Context, errCh <-chan error) error {
