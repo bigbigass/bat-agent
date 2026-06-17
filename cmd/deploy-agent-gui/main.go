@@ -34,6 +34,10 @@ type guiState struct {
 	startButton  *widget.Button
 	stopButton   *widget.Button
 
+	preDownloadCheck *widget.Check
+	projectEntry     *widget.Entry
+	artifactEntry    *widget.Entry
+
 	connectSeq int
 	refreshSeq int
 	running    bool
@@ -103,6 +107,22 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 	s.startButton = widget.NewButton("启动服务", s.startLocalService)
 	s.stopButton = widget.NewButton("停止服务", s.stopLocalService)
 
+	s.preDownloadCheck = widget.NewCheck("执行前下载", func(bool) {
+		s.updatePreDownloadInputs()
+		s.updateRunButton()
+	})
+	s.projectEntry = widget.NewEntry()
+	s.projectEntry.SetPlaceHolder("项目编号")
+	s.projectEntry.OnChanged = func(string) {
+		s.updateRunButton()
+	}
+	s.artifactEntry = widget.NewEntry()
+	s.artifactEntry.SetPlaceHolder("产物文件名")
+	s.artifactEntry.OnChanged = func(string) {
+		s.updateRunButton()
+	}
+	s.updatePreDownloadInputs()
+
 	s.scriptSelect = widget.NewSelect([]string{}, func(string) {})
 	refresh := widget.NewButton("刷新脚本", s.refreshScripts)
 	s.runButton = widget.NewButton("执行脚本", s.runSelectedScript)
@@ -136,7 +156,12 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 
 	actions := container.NewHBox(connect, save, s.startButton, s.stopButton)
 	top := container.NewBorder(nil, nil, nil, actions, connectionForm)
-	scripts := container.NewBorder(widget.NewLabel("脚本"), container.NewHBox(refresh, s.runButton), nil, nil, s.scriptSelect)
+	runForm := widget.NewForm(
+		widget.NewFormItem("", s.preDownloadCheck),
+		widget.NewFormItem("项目编号", s.projectEntry),
+		widget.NewFormItem("产物文件名", s.artifactEntry),
+	)
+	scripts := container.NewBorder(widget.NewLabel("脚本"), container.NewHBox(refresh, s.runButton), nil, nil, container.NewVBox(s.scriptSelect, runForm))
 	runInfo := container.NewBorder(status, nil, nil, nil, output)
 	mainSplit := container.NewHSplit(scripts, runInfo)
 	mainSplit.Offset = 0.25
@@ -234,6 +259,11 @@ func (s *guiState) runSelectedScript() {
 		s.setStatus("请选择脚本")
 		return
 	}
+	opts, err := preDownloadOptions(s.preDownloadCheck != nil && s.preDownloadCheck.Checked, entryText(s.projectEntry), entryText(s.artifactEntry))
+	if err != nil {
+		s.setStatus(err.Error())
+		return
+	}
 
 	s.running = true
 	s.updateRunButton()
@@ -241,7 +271,7 @@ func (s *guiState) runSelectedScript() {
 	s.setStatus("运行中: " + script)
 
 	go func() {
-		err := client.RunStream(context.Background(), script, func(event apiclient.StreamEvent) {
+		err := client.RunStreamWithOptions(context.Background(), script, opts, func(event apiclient.StreamEvent) {
 			fyne.Do(func() {
 				s.handleEvent(event)
 			})
@@ -307,11 +337,28 @@ func (s *guiState) updateRunButton() {
 	if s.runButton == nil {
 		return
 	}
-	if s.client != nil && !s.running && s.scriptSelect.Selected != "" {
+	ready := true
+	if s.preDownloadCheck != nil && s.projectEntry != nil && s.artifactEntry != nil {
+		ready = preDownloadInputsReady(s.preDownloadCheck.Checked, s.projectEntry.Text, s.artifactEntry.Text)
+	}
+	if s.client != nil && !s.running && s.scriptSelect != nil && s.scriptSelect.Selected != "" && ready {
 		s.runButton.Enable()
 		return
 	}
 	s.runButton.Disable()
+}
+
+func (s *guiState) updatePreDownloadInputs() {
+	if s.preDownloadCheck == nil || s.projectEntry == nil || s.artifactEntry == nil {
+		return
+	}
+	if s.preDownloadCheck.Checked {
+		s.projectEntry.Enable()
+		s.artifactEntry.Enable()
+		return
+	}
+	s.projectEntry.Disable()
+	s.artifactEntry.Disable()
 }
 
 func (s *guiState) updateLocalButtons() {
@@ -412,4 +459,11 @@ func (s *guiState) addHistory(value string) {
 		items = items[:20]
 	}
 	_ = s.history.Set(items)
+}
+
+func entryText(entry *widget.Entry) string {
+	if entry == nil {
+		return ""
+	}
+	return entry.Text
 }

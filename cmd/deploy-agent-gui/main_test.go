@@ -70,3 +70,54 @@ func TestRunErrorStatusGenericError(t *testing.T) {
 		t.Fatalf("status = %q, want generic request failure", status)
 	}
 }
+
+func TestPreDownloadOptionsDisabledReturnsEmptyOptions(t *testing.T) {
+	opts, err := preDownloadOptions(false, "", "")
+	if err != nil {
+		t.Fatalf("preDownloadOptions returned error: %v", err)
+	}
+	if opts.PreDownload.Enabled {
+		t.Fatalf("PreDownload.Enabled = true, want false")
+	}
+}
+
+func TestPreDownloadOptionsRequiresProjectAndArtifact(t *testing.T) {
+	_, err := preDownloadOptions(true, "ProjectA", "")
+	if err == nil {
+		t.Fatal("preDownloadOptions returned nil error, want missing artifact error")
+	}
+	if !strings.Contains(err.Error(), "产物文件名") {
+		t.Fatalf("error = %q, want artifact message", err.Error())
+	}
+}
+
+func TestPreDownloadOptionsBuildsEnabledRequest(t *testing.T) {
+	opts, err := preDownloadOptions(true, " ProjectA ", " app.zip ")
+	if err != nil {
+		t.Fatalf("preDownloadOptions returned error: %v", err)
+	}
+	if !opts.PreDownload.Enabled {
+		t.Fatal("PreDownload.Enabled = false, want true")
+	}
+	if opts.PreDownload.Project != "ProjectA" {
+		t.Fatalf("Project = %q, want ProjectA", opts.PreDownload.Project)
+	}
+	if opts.PreDownload.Artifact != "app.zip" {
+		t.Fatalf("Artifact = %q, want app.zip", opts.PreDownload.Artifact)
+	}
+}
+
+func TestPreDownloadInputsReadyAllowsDisabledInputs(t *testing.T) {
+	if !preDownloadInputsReady(false, "", "") {
+		t.Fatal("preDownloadInputsReady = false, want true when disabled")
+	}
+}
+
+func TestPreDownloadInputsReadyRequiresEnabledInputs(t *testing.T) {
+	if preDownloadInputsReady(true, "ProjectA", " ") {
+		t.Fatal("preDownloadInputsReady = true, want false without artifact")
+	}
+	if !preDownloadInputsReady(true, " ProjectA ", " app.zip ") {
+		t.Fatal("preDownloadInputsReady = false, want true with trimmed project and artifact")
+	}
+}
