@@ -82,12 +82,26 @@ func TestPreDownloadOptionsDisabledReturnsEmptyOptions(t *testing.T) {
 }
 
 func TestPreDownloadOptionsRequiresProjectAndArtifact(t *testing.T) {
-	_, err := preDownloadOptions(true, "ProjectA", "")
-	if err == nil {
-		t.Fatal("preDownloadOptions returned nil error, want missing artifact error")
+	tests := []struct {
+		name      string
+		project   string
+		artifact  string
+		wantError string
+	}{
+		{name: "project", project: "", artifact: "app.zip", wantError: "项目编号"},
+		{name: "artifact", project: "ProjectA", artifact: "", wantError: "产物文件名"},
 	}
-	if !strings.Contains(err.Error(), "产物文件名") {
-		t.Fatalf("error = %q, want artifact message", err.Error())
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := preDownloadOptions(true, tt.project, tt.artifact)
+			if err == nil {
+				t.Fatal("preDownloadOptions returned nil error, want missing field error")
+			}
+			if !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("error = %q, want message containing %q", err.Error(), tt.wantError)
+			}
+		})
 	}
 }
 
