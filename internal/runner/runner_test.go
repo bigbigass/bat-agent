@@ -68,6 +68,24 @@ func TestRunStreamCapturesAndStreamsStderr(t *testing.T) {
 	}
 }
 
+func TestRunStreamWithArgsPassesArguments(t *testing.T) {
+	scriptPath := writeBatch(t, "@echo off\r\necho project=%~1\r\necho artifact=%~2\r\n")
+
+	res, err := RunStreamWithArgs(context.Background(), scriptPath, []string{"Project A", "app.zip"}, 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("RunStreamWithArgs returned error: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "project=Project A") {
+		t.Fatalf("Stdout = %q, want project argument", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "artifact=app.zip") {
+		t.Fatalf("Stdout = %q, want artifact argument", res.Stdout)
+	}
+}
+
 func TestRunStreamSerializesOutputCallbacks(t *testing.T) {
 	scriptPath := writeBatch(t, strings.Join([]string{
 		"@echo off",

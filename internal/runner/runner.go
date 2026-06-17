@@ -50,7 +50,7 @@ type OutputFunc func(OutputChunk)
 // output. Runs with the parent process's token, so if deploy-agent is
 // elevated the script is elevated too.
 func Run(ctx context.Context, path string, timeout time.Duration) (Result, error) {
-	return RunStream(ctx, path, timeout, nil)
+	return RunStreamWithArgs(ctx, path, nil, timeout, nil)
 }
 
 // RunStream executes the given .bat/.cmd script via cmd.exe, captures output,
@@ -58,10 +58,16 @@ func Run(ctx context.Context, path string, timeout time.Duration) (Result, error
 // callbacks are invoked synchronously and serialized across both streams, so a
 // slow callback can block script output processing.
 func RunStream(ctx context.Context, path string, timeout time.Duration, onOutput OutputFunc) (Result, error) {
+	return RunStreamWithArgs(ctx, path, nil, timeout, onOutput)
+}
+
+func RunStreamWithArgs(ctx context.Context, path string, scriptArgs []string, timeout time.Duration, onOutput OutputFunc) (Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "cmd.exe", "/c", path)
+	cmdArgs := []string{"/c", path}
+	cmdArgs = append(cmdArgs, scriptArgs...)
+	cmd := exec.CommandContext(ctx, "cmd.exe", cmdArgs...)
 	cmd.Dir = filepath.Dir(path)
 
 	stdoutBuf := &cappedBuffer{limit: maxOutputBytes}
