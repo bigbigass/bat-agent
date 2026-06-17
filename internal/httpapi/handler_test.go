@@ -72,6 +72,36 @@ func makeServerWithTimeout(t *testing.T, files map[string]string, timeout time.D
 	}
 }
 
+func makeServerWithPreDownload(t *testing.T, files map[string]string, timeout time.Duration, downloadBody string, downloadTimeout time.Duration) testServer {
+	t.Helper()
+
+	dir := t.TempDir()
+	download := filepath.Join(dir, "download.bat")
+	if err := os.WriteFile(download, []byte(downloadBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg, err := registry.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := executor.New(reg, timeout, executor.WithPreDownloadConfig(executor.PreDownloadConfig{
+		ScriptPath: download,
+		Timeout:    downloadTimeout,
+	}))
+	api := New(exec)
+	return testServer{
+		handler: api.Routes(func(h http.Handler) http.Handler {
+			return auth.BasicAuth("admin", "change-me-please", h)
+		}),
+		reg: reg,
+	}
+}
+
 func authHeader() string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:change-me-please"))
 }
@@ -241,6 +271,60 @@ func TestRunNonZeroExitCodeStillReturnsHTTP200(t *testing.T) {
 	}
 	if _, ok := body["error"]; ok {
 		t.Fatalf("ordinary script exit must not include error field: %#v", body)
+	}
+}
+
+func TestRunScriptTimeoutReturnsStableError(t *testing.T) {
+	server := makeServerWithTimeout(t, map[string]string{"slow.bat": "@echo off\r\nping -n 3 127.0.0.1 >nul\r\n"}, 20*time.Millisecond)
+	rec := httptest.NewRecorder()
+
+	server.handler.ServeHTTP(rec, postRun("slow.bat"))
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		TimedOut bool   `json:"timedOut"`
+		Error    string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.TimedOut {
+		t.Fatal("timedOut = false, want true")
+	}
+	if body.Error != "script timed out" {
+		t.Fatalf("error = %q, want script timed out", body.Error)
+	}
+}
+
+func TestRunPreDownloadTimeoutReturnsStableError(t *testing.T) {
+	server := makeServerWithPreDownload(
+		t,
+		map[string]string{"deploy.bat": "@echo off\r\necho target\r\n"},
+		5*time.Second,
+		"@echo off\r\nping -n 3 127.0.0.1 >nul\r\n",
+		20*time.Millisecond,
+	)
+	rec := httptest.NewRecorder()
+
+	server.handler.ServeHTTP(rec, postRunBody(`{"script":"deploy.bat","preDownload":{"enabled":true,"project":"ProjectA","artifact":"app.zip"}}`))
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		TimedOut bool   `json:"timedOut"`
+		Error    string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.TimedOut {
+		t.Fatal("timedOut = false, want true")
+	}
+	if body.Error != "pre-run download timed out" {
+		t.Fatalf("error = %q, want pre-run download timed out", body.Error)
 	}
 }
 

@@ -140,6 +140,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		DurationMs: result.FinishedAt.Sub(result.StartedAt).Milliseconds(),
 		TimedOut:   result.TimedOut,
 	}
+	if err != nil {
+		resp.Error = executor.StableError(err)
+	}
 
 	status := http.StatusOK
 	switch {
@@ -147,7 +150,6 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusGatewayTimeout
 	case err != nil:
 		status = http.StatusInternalServerError
-		resp.Error = err.Error()
 	}
 	writeJSON(w, status, resp)
 }
