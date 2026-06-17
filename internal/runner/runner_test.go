@@ -86,6 +86,42 @@ func TestRunStreamWithArgsPassesArguments(t *testing.T) {
 	}
 }
 
+func TestRunStreamWithArgsPassesShellSensitiveArgumentsLiterally(t *testing.T) {
+	tempDir := t.TempDir()
+	markerPath := filepath.Join(tempDir, "marker.txt")
+	scriptPath := writeBatch(t, strings.Join([]string{
+		"@echo off",
+		"echo arg1=%~1",
+		"echo arg2=%~2",
+		"echo arg3=%~3",
+		"",
+	}, "\r\n"))
+
+	res, err := RunStreamWithArgs(context.Background(), scriptPath, []string{
+		"Project&A > " + markerPath,
+		"Project%PATH%",
+		"name^value",
+	}, 5*time.Second, nil)
+	if err != nil {
+		t.Fatalf("RunStreamWithArgs returned error: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0; stderr=%q", res.ExitCode, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "arg1=Project&A > "+markerPath) {
+		t.Fatalf("Stdout = %q, want literal ampersand argument", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "arg2=Project%PATH%") {
+		t.Fatalf("Stdout = %q, want literal percent argument", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "arg3=name^value") {
+		t.Fatalf("Stdout = %q, want literal caret argument", res.Stdout)
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Fatalf("marker file exists or stat failed unexpectedly: %v", err)
+	}
+}
+
 func TestRunStreamSerializesOutputCallbacks(t *testing.T) {
 	scriptPath := writeBatch(t, strings.Join([]string{
 		"@echo off",
