@@ -76,13 +76,54 @@ func TestRunStreamReturnsBusyWhenSameScriptIsLocked(t *testing.T) {
 	}
 }
 
+func TestRunCollectWithOptionsRejectsInvalidPreDownload(t *testing.T) {
+	reg := makeRegistry(t, map[string]string{"deploy.bat": "@echo off\r\necho deploy\r\n"})
+	exec := New(reg, 5*time.Second)
+
+	res, err := exec.RunCollectWithOptions(context.Background(), "deploy.bat", RunOptions{
+		PreDownload: PreDownloadRequest{
+			Enabled:  true,
+			Project:  "..",
+			Artifact: "app.zip",
+		},
+	})
+
+	if !errors.Is(err, ErrInvalidPreDownloadRequest) {
+		t.Fatalf("expected ErrInvalidPreDownloadRequest, got %v", err)
+	}
+	if res.Script != "deploy.bat" {
+		t.Fatalf("Script = %q, want deploy.bat", res.Script)
+	}
+}
+
+func TestRunCollectWithOptionsRejectsMissingPreDownloadConfig(t *testing.T) {
+	reg := makeRegistry(t, map[string]string{"deploy.bat": "@echo off\r\necho deploy\r\n"})
+	exec := New(reg, 5*time.Second)
+
+	_, err := exec.RunCollectWithOptions(context.Background(), "deploy.bat", RunOptions{
+		PreDownload: PreDownloadRequest{
+			Enabled:  true,
+			Project:  "ProjectA",
+			Artifact: "app.zip",
+		},
+	})
+
+	if !errors.Is(err, ErrPreDownloadNotConfigured) {
+		t.Fatalf("expected ErrPreDownloadNotConfigured, got %v", err)
+	}
+}
+
 func TestStableErrorText(t *testing.T) {
 	cases := map[error]string{
-		ErrInvalidScriptName: "invalid script name",
-		ErrScriptNotFound:    "script not found",
-		ErrScriptBusy:        "script is already running",
-		ErrRunnerStart:       "runner start failed",
-		ErrScriptTimedOut:    "script timed out",
+		ErrInvalidScriptName:         "invalid script name",
+		ErrScriptNotFound:            "script not found",
+		ErrScriptBusy:                "script is already running",
+		ErrRunnerStart:               "runner start failed",
+		ErrScriptTimedOut:            "script timed out",
+		ErrPreDownloadNotConfigured:  "pre-run download is not configured",
+		ErrInvalidPreDownloadRequest: "invalid pre-run download request",
+		ErrPreDownloadFailed:         "pre-run download failed",
+		ErrPreDownloadTimedOut:       "pre-run download timed out",
 	}
 
 	for err, want := range cases {

@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/liqixin/deploy-agent/internal/registry"
@@ -15,12 +16,35 @@ var (
 	ErrScriptBusy        = errors.New("script is already running")
 	ErrRunnerStart       = errors.New("runner start failed")
 	ErrScriptTimedOut    = errors.New("script timed out")
+
+	ErrPreDownloadNotConfigured  = errors.New("pre-run download is not configured")
+	ErrInvalidPreDownloadRequest = errors.New("invalid pre-run download request")
+	ErrPreDownloadFailed         = errors.New("pre-run download failed")
+	ErrPreDownloadTimedOut       = errors.New("pre-run download timed out")
 )
 
 type Executor struct {
-	reg     *registry.Registry
-	timeout time.Duration
+	reg         *registry.Registry
+	timeout     time.Duration
+	preDownload PreDownloadConfig
 }
+
+type RunOptions struct {
+	PreDownload PreDownloadRequest
+}
+
+type PreDownloadRequest struct {
+	Enabled  bool
+	Project  string
+	Artifact string
+}
+
+type PreDownloadConfig struct {
+	ScriptPath string
+	Timeout    time.Duration
+}
+
+type Option func(*Executor)
 
 type Result struct {
 	Script     string
@@ -39,8 +63,18 @@ type OutputChunk struct {
 
 type OutputFunc func(OutputChunk)
 
-func New(reg *registry.Registry, timeout time.Duration) *Executor {
-	return &Executor{reg: reg, timeout: timeout}
+func New(reg *registry.Registry, timeout time.Duration, opts ...Option) *Executor {
+	e := &Executor{reg: reg, timeout: timeout}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
+}
+
+func WithPreDownloadConfig(cfg PreDownloadConfig) Option {
+	return func(e *Executor) {
+		e.preDownload = cfg
+	}
 }
 
 func (e *Executor) List() []string {
@@ -48,13 +82,29 @@ func (e *Executor) List() []string {
 }
 
 func (e *Executor) RunCollect(ctx context.Context, script string) (Result, error) {
-	return e.RunStream(ctx, script, nil)
+	return e.RunCollectWithOptions(ctx, script, RunOptions{})
+}
+
+func (e *Executor) RunCollectWithOptions(ctx context.Context, script string, opts RunOptions) (Result, error) {
+	return e.RunStreamWithOptions(ctx, script, opts, nil)
 }
 
 func (e *Executor) RunStream(ctx context.Context, script string, onOutput OutputFunc) (Result, error) {
+	return e.RunStreamWithOptions(ctx, script, RunOptions{}, onOutput)
+}
+
+func (e *Executor) RunStreamWithOptions(ctx context.Context, script string, opts RunOptions, onOutput OutputFunc) (Result, error) {
 	entry, err := e.reg.Lookup(script)
 	if err != nil {
 		return lookupErrorResult(script, err)
+	}
+
+	preDownload, err := validatePreDownload(opts.PreDownload)
+	if err != nil {
+		return Result{Script: entry.Name, ExitCode: -1}, err
+	}
+	if preDownload.Enabled && strings.TrimSpace(e.preDownload.ScriptPath) == "" {
+		return Result{Script: entry.Name, ExitCode: -1}, ErrPreDownloadNotConfigured
 	}
 
 	if !entry.TryLock() {
@@ -63,15 +113,7 @@ func (e *Executor) RunStream(ctx context.Context, script string, onOutput Output
 	defer entry.Unlock()
 
 	res, err := runner.RunStream(ctx, entry.Path, e.timeout, adaptOutputFunc(onOutput))
-	out := Result{
-		Script:     entry.Name,
-		ExitCode:   res.ExitCode,
-		Stdout:     res.Stdout,
-		Stderr:     res.Stderr,
-		StartedAt:  res.StartedAt,
-		FinishedAt: res.FinishedAt,
-		TimedOut:   res.TimedOut,
-	}
+	out := resultFromRunner(entry.Name, res)
 	if res.TimedOut {
 		return out, ErrScriptTimedOut
 	}
@@ -79,6 +121,37 @@ func (e *Executor) RunStream(ctx context.Context, script string, onOutput Output
 		return out, runnerStartError{err: err}
 	}
 	return out, nil
+}
+
+func validatePreDownload(req PreDownloadRequest) (PreDownloadRequest, error) {
+	if !req.Enabled {
+		return PreDownloadRequest{}, nil
+	}
+	req.Project = strings.TrimSpace(req.Project)
+	req.Artifact = strings.TrimSpace(req.Artifact)
+	if req.Project == "" || req.Artifact == "" {
+		return req, ErrInvalidPreDownloadRequest
+	}
+	if unsafeDownloadValue(req.Project) || unsafeDownloadValue(req.Artifact) {
+		return req, ErrInvalidPreDownloadRequest
+	}
+	return req, nil
+}
+
+func unsafeDownloadValue(value string) bool {
+	return strings.ContainsAny(value, `/\:&|<>^%"!`) || strings.Contains(value, "..")
+}
+
+func resultFromRunner(script string, res runner.Result) Result {
+	return Result{
+		Script:     script,
+		ExitCode:   res.ExitCode,
+		Stdout:     res.Stdout,
+		Stderr:     res.Stderr,
+		StartedAt:  res.StartedAt,
+		FinishedAt: res.FinishedAt,
+		TimedOut:   res.TimedOut,
+	}
 }
 
 func lookupErrorResult(script string, err error) (Result, error) {
@@ -114,6 +187,14 @@ func StableError(err error) string {
 		return "runner start failed"
 	case errors.Is(err, ErrScriptTimedOut):
 		return "script timed out"
+	case errors.Is(err, ErrPreDownloadNotConfigured):
+		return "pre-run download is not configured"
+	case errors.Is(err, ErrInvalidPreDownloadRequest):
+		return "invalid pre-run download request"
+	case errors.Is(err, ErrPreDownloadFailed):
+		return "pre-run download failed"
+	case errors.Is(err, ErrPreDownloadTimedOut):
+		return "pre-run download timed out"
 	case err == nil:
 		return ""
 	default:
