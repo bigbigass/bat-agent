@@ -148,3 +148,82 @@ auth:
 		t.Fatalf("unexpected broker: %q", cfg.Services.MQTT.Broker)
 	}
 }
+
+func TestLoadDefaultsPreRunDownloadTimeout(t *testing.T) {
+	path := writeConfig(t, `
+auth:
+  username: admin
+  password: change-me-please
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.PreRun.Download.Script != "" {
+		t.Fatalf("preRun.download.script = %q, want empty", cfg.PreRun.Download.Script)
+	}
+	if cfg.PreRun.Download.TimeoutSeconds != 300 {
+		t.Fatalf("preRun.download.timeoutSeconds = %d, want 300", cfg.PreRun.Download.TimeoutSeconds)
+	}
+}
+
+func TestLoadParsesPreRunDownload(t *testing.T) {
+	path := writeConfig(t, `
+auth:
+  username: admin
+  password: change-me-please
+preRun:
+  download:
+    script: tools/download_simple.bat
+    timeoutSeconds: 120
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.PreRun.Download.Script != "tools/download_simple.bat" {
+		t.Fatalf("script = %q, want configured script", cfg.PreRun.Download.Script)
+	}
+	if cfg.PreRun.Download.TimeoutSeconds != 120 {
+		t.Fatalf("timeoutSeconds = %d, want 120", cfg.PreRun.Download.TimeoutSeconds)
+	}
+}
+
+func TestLoadRejectsInvalidPreRunDownloadTimeout(t *testing.T) {
+	path := writeConfig(t, `
+auth:
+  username: admin
+  password: change-me-please
+preRun:
+  download:
+    timeoutSeconds: 0
+`)
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "preRun.download.timeoutSeconds must be > 0") {
+		t.Fatalf("expected preRun download timeout validation error, got %v", err)
+	}
+}
+
+func TestResolvePreRunDownloadScriptUsesConfigDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	cfg := &Config{
+		PreRun: PreRunConfig{
+			Download: PreRunDownloadConfig{
+				Script: "tools/download_simple.bat",
+			},
+		},
+	}
+
+	got, err := cfg.ResolvePreRunDownloadScript(path)
+	if err != nil {
+		t.Fatalf("ResolvePreRunDownloadScript returned error: %v", err)
+	}
+	want := filepath.Join(dir, "tools", "download_simple.bat")
+	if got != want {
+		t.Fatalf("path = %q, want %q", got, want)
+	}
+}

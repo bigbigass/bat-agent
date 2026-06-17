@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,6 +14,7 @@ type Config struct {
 	Services ServicesConfig `yaml:"services"`
 	Auth     AuthConfig     `yaml:"auth"`
 	Runner   RunnerConfig   `yaml:"runner"`
+	PreRun   PreRunConfig   `yaml:"preRun"`
 }
 
 type ServerConfig struct {
@@ -49,6 +51,15 @@ type RunnerConfig struct {
 	ScriptDir      string `yaml:"scriptDir"`
 }
 
+type PreRunConfig struct {
+	Download PreRunDownloadConfig `yaml:"download"`
+}
+
+type PreRunDownloadConfig struct {
+	Script         string `yaml:"script"`
+	TimeoutSeconds int    `yaml:"timeoutSeconds"`
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -78,6 +89,9 @@ func defaults() *Config {
 			},
 		},
 		Runner: RunnerConfig{TimeoutSeconds: 300},
+		PreRun: PreRunConfig{
+			Download: PreRunDownloadConfig{TimeoutSeconds: 300},
+		},
 	}
 }
 
@@ -110,6 +124,9 @@ func (c *Config) validate() error {
 	if c.Runner.TimeoutSeconds <= 0 {
 		return fmt.Errorf("runner.timeoutSeconds must be > 0")
 	}
+	if c.PreRun.Download.TimeoutSeconds <= 0 {
+		return fmt.Errorf("preRun.download.timeoutSeconds must be > 0")
+	}
 	return nil
 }
 
@@ -124,4 +141,16 @@ func (c *Config) ResolveScriptDir() (string, error) {
 		return "", err
 	}
 	return filepath.Dir(exe), nil
+}
+
+func (c *Config) ResolvePreRunDownloadScript(configPath string) (string, error) {
+	script := strings.TrimSpace(c.PreRun.Download.Script)
+	if script == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(script) {
+		return filepath.Clean(script), nil
+	}
+	base := filepath.Dir(configPath)
+	return filepath.Abs(filepath.Join(base, script))
 }
