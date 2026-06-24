@@ -36,6 +36,19 @@ func TestHTTPBaseURLForConfigPreservesSpecificHost(t *testing.T) {
 	}
 }
 
+func TestHTTPBaseURLForConfigNormalizesIPv6Hosts(t *testing.T) {
+	tests := []string{"::1", "[::1]"}
+	for _, host := range tests {
+		t.Run(host, func(t *testing.T) {
+			cfg := &config.Config{Server: config.ServerConfig{Host: host, Port: 8080}}
+			got := HTTPBaseURLForConfig(cfg)
+			if got != "http://[::1]:8080" {
+				t.Fatalf("HTTPBaseURLForConfig(%q) = %q, want normalized IPv6 URL", host, got)
+			}
+		})
+	}
+}
+
 func TestHTTPClientConfigReturnsEmbeddedServiceAuth(t *testing.T) {
 	svc := &Service{
 		cfg: &config.Config{

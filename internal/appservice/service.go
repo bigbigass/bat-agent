@@ -57,6 +57,9 @@ func localConnectHost(host string) string {
 	case "", "0.0.0.0", "::", "[::]":
 		return "127.0.0.1"
 	default:
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			return strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+		}
 		return host
 	}
 }
