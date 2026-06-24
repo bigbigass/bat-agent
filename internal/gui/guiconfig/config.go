@@ -49,6 +49,9 @@ func Load(path string) (Config, error) {
 	if cfg.Mode == "" {
 		cfg.Mode = ModeLocal
 	}
+	if cfg.Mode == ModeLocal {
+		cfg = ForSave(cfg)
+	}
 	if cfg.Mode == ModeRemote && cfg.BaseURL == "" {
 		cfg.BaseURL = "http://127.0.0.1:8080"
 	}

@@ -81,6 +81,31 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoadClearsLegacyLocalConnectionCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"mode":"local","baseUrl":"http://old","username":"admin","password":"secret"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got.Mode != ModeLocal {
+		t.Fatalf("Mode = %q, want local", got.Mode)
+	}
+	if got.BaseURL != "" {
+		t.Fatalf("BaseURL = %q, want empty", got.BaseURL)
+	}
+	if got.Username != "" {
+		t.Fatalf("Username = %q, want empty", got.Username)
+	}
+	if got.Password != "" {
+		t.Fatalf("Password = %q, want empty", got.Password)
+	}
+}
+
 func TestLoadMissingFileReturnsDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.json")
 
