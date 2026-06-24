@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-REM Build deploy-agent.exe and deploy-agent-gui.exe with UAC-elevating manifests embedded.
+REM Build deploy-agent-gui.exe as the primary GUI+service app, plus deploy-agent.exe as a compatible console service.
 
 set "RSRC=rsrc"
 
@@ -42,7 +42,7 @@ echo Building deploy-agent-gui.exe...
 set CGO_ENABLED=1
 go build -ldflags "-H=windowsgui -s -w" -o deploy-agent-gui.exe .\cmd\deploy-agent-gui || goto :error
 
-echo Done: deploy-agent.exe deploy-agent-gui.exe
+echo Done: deploy-agent-gui.exe deploy-agent.exe
 exit /b 0
 
 :error

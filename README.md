@@ -1,6 +1,6 @@
 # deploy-agent
 
-一个跑在 Windows 上的 Go HTTP 服务。把它丢进任何放着一堆 `.bat` / `.cmd` 脚本的目录，启动后即可通过 HTTP 触发这些脚本。程序以管理员权限运行，子进程自动继承管理员 token。
+一个跑在 Windows 上的 Go 管理工具。日常使用启动 `deploy-agent-gui.exe`：它既是桌面 GUI，也是后台 HTTP/MQTT 服务，会从配置目录扫描白名单 `.bat` / `.cmd` 脚本并以管理员权限执行。HTTP API 仍然保留，便于 curl、远程调用和集成系统触发脚本。
 
 ## 构建
 
@@ -10,7 +10,7 @@
 build.bat
 ```
 
-产物：`deploy-agent.exe` 和 `deploy-agent-gui.exe`。二者都内嵌 UAC 清单，双击会弹管理员确认框。
+产物：`deploy-agent-gui.exe` 和兼容用的 `deploy-agent.exe`。日常使用优先启动 `deploy-agent-gui.exe`，它会在 GUI 进程内启动服务；`deploy-agent.exe` 只是无界面的后台入口。二者都内嵌 UAC 清单，双击会弹管理员确认框。
 
 GUI 使用 Fyne 构建，需要启用 CGO，并且 PATH 中有可用的 C 编译器（如 gcc）。
 
@@ -330,31 +330,31 @@ whoami /groups | findstr "S-1-16-12288"
 
 ## GUI 管理端
 
-`deploy-agent-gui.exe` 是独立 Windows 桌面程序，用于连接和管理 `deploy-agent`。
+`deploy-agent-gui.exe` 是主要入口：它既是 Windows 桌面程序，也是 `deploy-agent` 后台服务。
 
 本机模式：
 
-- 将 `deploy-agent-gui.exe` 与 `deploy-agent.exe` 放在同一目录。
+- 直接启动 `deploy-agent-gui.exe`。
 - GUI 本机模式需要管理员权限；`build.bat` 生成的 GUI 已内嵌 `requireAdministrator` 清单，启动时会弹 UAC。
-- GUI 会启动或停止同目录的 `deploy-agent.exe`，服务进程继承 GUI 的管理员权限。
-- 停止服务只作用于 GUI 本次启动并跟踪的进程，会同时终止该服务进程树；外部启动的服务不会被强制停止。
-- 本机启动成功后，GUI 会自动轮询 `/health`，连接服务并加载脚本列表，无需再手动点击“连接”。
-- 如果服务不是由 GUI 启动，第一版不会强制结束未知进程。
+- GUI 会在同一进程内启动 HTTP/MQTT 服务，不再要求同目录存在 `deploy-agent.exe`。
+- 本机模式不需要在界面里输入服务地址、用户名或密码；GUI 会使用 `config.yaml` 中的 `server` 和 `auth` 配置连接内嵌服务。
+- 关闭窗口只会隐藏到系统托盘，服务继续运行。
+- 从托盘菜单选择“打开”可恢复窗口，选择“退出”才会停止内嵌服务并结束进程。
 
 远程模式：
 
 - 填写远程服务地址、HTTP Basic Auth 用户名和密码。
 - GUI 通过 `/scripts` 列出脚本，通过 `/run/stream` 执行脚本并实时显示输出。
-- 远程模式不会启动或停止本机 `deploy-agent.exe`。
+- 远程模式不会管理本机内嵌服务以外的任何远程进程。
 
-GUI 会把服务地址、用户名和密码保存到本地配置文件，默认在用户配置目录下的 `deploy-agent-gui/config.json`。这是便捷存储，不是强安全存储；请保护该文件权限，不要提交或分享它。
+GUI 会把远程模式的服务地址、用户名和密码保存到本地配置文件，默认在用户配置目录下的 `deploy-agent-gui/config.json`。本机模式不会保存本机服务账号密码；本机认证来自 `config.yaml`。远程密码是便捷存储，不是强安全存储，请保护该文件权限，不要提交或分享它。
 
 第一版限制：
 
 - 不支持脚本参数。
 - 不支持中止正在运行的脚本。
 - 不持久化执行历史。
-- 不提供系统托盘。
+- 不提供 Windows Service 注册。
 
 ## 安全说明
 
