@@ -31,12 +31,16 @@ func run() error {
 	if err := svc.Start(ctx); err != nil {
 		return err
 	}
-	if err := svc.Wait(ctx); err != nil {
-		return err
+	waitErr := svc.Wait(ctx)
+	if waitErr == nil {
+		log.Printf("shutdown signal received")
 	}
-	log.Printf("shutdown signal received")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return svc.Shutdown(shutdownCtx)
+	shutdownErr := svc.Shutdown(shutdownCtx)
+	if waitErr != nil {
+		return waitErr
+	}
+	return shutdownErr
 }
