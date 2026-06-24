@@ -18,7 +18,8 @@ type localHTTPProvider interface {
 }
 
 func clientConfigForMode(mode string, cfg guiconfig.Config, local localHTTPProvider) (clientConfig, error) {
-	if mode == guiconfig.ModeLocal {
+	switch mode {
+	case guiconfig.ModeLocal:
 		if local == nil {
 			return clientConfig{}, fmt.Errorf("本机服务 HTTP 未启用")
 		}
@@ -31,10 +32,13 @@ func clientConfigForMode(mode string, cfg guiconfig.Config, local localHTTPProvi
 			Username: localCfg.Username,
 			Password: localCfg.Password,
 		}, nil
+	case guiconfig.ModeRemote:
+		return clientConfig{
+			BaseURL:  cfg.BaseURL,
+			Username: cfg.Username,
+			Password: cfg.Password,
+		}, nil
+	default:
+		return clientConfig{}, fmt.Errorf("未知连接模式: %q", mode)
 	}
-	return clientConfig{
-		BaseURL:  cfg.BaseURL,
-		Username: cfg.Username,
-		Password: cfg.Password,
-	}, nil
 }

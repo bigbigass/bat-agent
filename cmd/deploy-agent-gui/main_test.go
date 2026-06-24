@@ -212,3 +212,15 @@ func TestClientConfigForRemoteModeUsesGUIConfig(t *testing.T) {
 		t.Fatalf("client config = %#v, want remote GUI config", got)
 	}
 }
+
+func TestClientConfigForUnknownModeReturnsError(t *testing.T) {
+	unknownMode := "corrupt-mode"
+
+	_, err := clientConfigForMode(unknownMode, guiconfig.Config{Mode: unknownMode}, fakeLocalHTTPProvider{})
+	if err == nil {
+		t.Fatal("clientConfigForMode returned nil, want unknown mode error")
+	}
+	if !strings.Contains(err.Error(), unknownMode) {
+		t.Fatalf("error = %q, want message containing %q", err.Error(), unknownMode)
+	}
+}
