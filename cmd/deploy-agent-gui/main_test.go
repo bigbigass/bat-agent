@@ -7,7 +7,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/liqixin/deploy-agent/internal/appservice"
 	"github.com/liqixin/deploy-agent/internal/gui/apiclient"
+	"github.com/liqixin/deploy-agent/internal/gui/guiconfig"
 )
 
 func TestCapOutputKeepsTailAndMarksTruncation(t *testing.T) {
@@ -133,5 +135,80 @@ func TestPreDownloadInputsReadyRequiresEnabledInputs(t *testing.T) {
 	}
 	if !preDownloadInputsReady(true, " ProjectA ", " app.zip ") {
 		t.Fatal("preDownloadInputsReady = false, want true with trimmed project and artifact")
+	}
+}
+
+type fakeLocalHTTPProvider struct {
+	cfg appservice.HTTPClientConfig
+	ok  bool
+}
+
+func (f fakeLocalHTTPProvider) HTTPClientConfig() (appservice.HTTPClientConfig, bool) {
+	return f.cfg, f.ok
+}
+
+func TestClientConfigForLocalModeUsesEmbeddedServiceAndIgnoresGUISecrets(t *testing.T) {
+	guiCfg := guiconfig.Config{
+		Mode:     guiconfig.ModeLocal,
+		BaseURL:  "http://wrong:9999",
+		Username: "wrong-user",
+		Password: "wrong-password",
+	}
+	local := fakeLocalHTTPProvider{
+		ok: true,
+		cfg: appservice.HTTPClientConfig{
+			BaseURL:  "http://127.0.0.1:8080",
+			Username: "admin",
+			Password: "change-me-please",
+		},
+	}
+
+	got, err := clientConfigForMode(guiCfg.Mode, guiCfg, local)
+	if err != nil {
+		t.Fatalf("clientConfigForMode returned error: %v", err)
+	}
+	if got.BaseURL != "http://127.0.0.1:8080" {
+		t.Fatalf("BaseURL = %q", got.BaseURL)
+	}
+	if got.Username != "admin" {
+		t.Fatalf("Username = %q", got.Username)
+	}
+	if got.Password != "change-me-please" {
+		t.Fatalf("Password = %q", got.Password)
+	}
+}
+
+func TestClientConfigForLocalModeRequiresEmbeddedHTTP(t *testing.T) {
+	_, err := clientConfigForMode(guiconfig.ModeLocal, guiconfig.Config{Mode: guiconfig.ModeLocal}, fakeLocalHTTPProvider{})
+	if err == nil {
+		t.Fatal("clientConfigForMode returned nil, want local service error")
+	}
+	if !strings.Contains(err.Error(), "本机服务 HTTP 未启用") {
+		t.Fatalf("error = %q, want local HTTP message", err.Error())
+	}
+}
+
+func TestClientConfigForRemoteModeUsesGUIConfig(t *testing.T) {
+	guiCfg := guiconfig.Config{
+		Mode:     guiconfig.ModeRemote,
+		BaseURL:  "http://10.0.0.5:8080",
+		Username: "alice",
+		Password: "secret-password",
+	}
+	local := fakeLocalHTTPProvider{
+		ok: true,
+		cfg: appservice.HTTPClientConfig{
+			BaseURL:  "http://127.0.0.1:8080",
+			Username: "admin",
+			Password: "change-me-please",
+		},
+	}
+
+	got, err := clientConfigForMode(guiCfg.Mode, guiCfg, local)
+	if err != nil {
+		t.Fatalf("clientConfigForMode returned error: %v", err)
+	}
+	if got.BaseURL != guiCfg.BaseURL || got.Username != guiCfg.Username || got.Password != guiCfg.Password {
+		t.Fatalf("client config = %#v, want remote GUI config", got)
 	}
 }
