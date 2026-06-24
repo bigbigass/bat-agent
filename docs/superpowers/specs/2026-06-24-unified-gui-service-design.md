@@ -18,10 +18,12 @@ GUI 的本机模式会启动同目录下的 `deploy-agent.exe`，然后继续通
 3. 内嵌服务复用现有服务逻辑：配置加载、脚本 registry、executor、HTTP、MQTT、超时、锁和输出处理都保持一致。
 4. HTTP API 保持可用，现有 `/health`、`/scripts`、`/run`、`/run/stream` 行为不变。
 5. GUI 仍通过 HTTP 客户端访问本机服务，避免形成另一套执行路径。
-6. 关闭主窗口时默认隐藏到系统托盘，服务继续运行。
-7. 托盘菜单提供打开窗口和退出程序。
-8. 退出程序时优雅停止 HTTP server、MQTT client、registry watcher 和相关后台 goroutine。
-9. README 和构建说明更新为单程序使用方式。
+6. 本机一体化模式不要求用户输入 HTTP Basic Auth 用户名或密码。
+7. 本机一体化模式的 GUI 客户端从已加载的 `config.yaml` 自动使用服务认证配置。
+8. 关闭主窗口时默认隐藏到系统托盘，服务继续运行。
+9. 托盘菜单提供打开窗口和退出程序。
+10. 退出程序时优雅停止 HTTP server、MQTT client、registry watcher 和相关后台 goroutine。
+11. README 和构建说明更新为单程序使用方式。
 
 ## 非目标
 
@@ -115,6 +117,8 @@ func (s *Service) HTTPBaseURL() string
 
 GUI 不直接调用 executor。脚本列表、执行和流式输出继续通过 `internal/gui/apiclient` 调 HTTP API。
 
+本机模式下，连接区不显示服务地址、用户名和密码输入框，也不要求用户保存本机连接凭据。GUI 内部用内嵌服务返回的本机 Base URL 和 `config.yaml` 中的 Basic Auth 配置创建 HTTP client。远程模式下才显示远程服务地址、用户名和密码输入框。
+
 ## 托盘行为
 
 Fyne 支持桌面系统托盘能力，优先使用 Fyne 原生桌面 API 实现，避免额外引入托盘库。
@@ -131,7 +135,7 @@ Fyne 支持桌面系统托盘能力，优先使用 Fyne 原生桌面 API 实现�
 
 ## 配置
 
-继续使用服务端 `config.yaml` 作为后台服务配置来源。GUI 自己的连接配置文件仍可保存远程连接信息和界面偏好。
+继续使用服务端 `config.yaml` 作为后台服务配置来源。GUI 自己的连接配置文件只保存远程连接信息和界面偏好，不保存本机一体化模式使用的服务账号密码。
 
 本机模式下，GUI 不需要用户输入服务地址。服务地址来自内嵌服务实际监听地址：
 
@@ -141,7 +145,7 @@ http://<server.host>:<server.port>
 
 如果 `server.host` 是空值或通配地址，本机 GUI 应使用 `127.0.0.1` 作为连接主机。端口仍来自配置。
 
-认证仍使用 `config.yaml` 中的 Basic Auth 用户名和密码。GUI 内嵌服务时可以直接用已加载配置填充本机客户端，不要求用户重复输入本机账号密码。
+认证仍使用 `config.yaml` 中的 Basic Auth 用户名和密码。GUI 内嵌服务时必须直接用已加载配置填充本机 HTTP client，不显示、不要求输入、不保存本机账号密码。
 
 远程模式继续使用 GUI 配置文件中的远程地址、用户名和密码。
 
@@ -193,10 +197,12 @@ README 需要更新：
 
 1. 项目运行方式改为优先启动 `deploy-agent-gui.exe`。
 2. 说明 GUI 同时是服务，打开后自动启动 HTTP/MQTT。
-3. 说明关闭窗口会最小化到托盘，托盘退出才停止服务。
-4. 删除“GUI 会启动同目录 deploy-agent.exe”的旧说明。
-5. 保留 HTTP API、MQTT、配置文件和安全说明。
-6. 更新构建产物说明。
+3. 说明本机一体化模式不需要输入账号密码，GUI 会自动使用 `config.yaml` 中的服务认证配置。
+4. 说明远程模式才需要填写远程服务地址、用户名和密码。
+5. 说明关闭窗口会最小化到托盘，托盘退出才停止服务。
+6. 删除“GUI 会启动同目录 deploy-agent.exe”的旧说明。
+7. 保留 HTTP API、MQTT、配置文件和安全说明。
+8. 更新构建产物说明。
 
 ## 测试策略
 
@@ -219,6 +225,7 @@ README 需要更新：
 2. 托盘退出触发服务 shutdown。
 3. 本机模式使用内嵌服务地址和认证信息。
 4. 远程模式仍使用 GUI 配置地址和认证信息。
+5. 本机模式不读取、不显示、不保存 GUI 配置文件中的用户名和密码。
 
 Fyne 真实托盘行为以 Windows 手动验证为准。
 
