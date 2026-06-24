@@ -99,7 +99,7 @@ func TestHTTPClientConfigUnavailableWhenHTTPDisabled(t *testing.T) {
 
 func TestServiceStartExposesHealthAndShutdownStopsHTTP(t *testing.T) {
 	dir := t.TempDir()
-	port := freePort(t)
+	port := reserveHTTPListener(t)
 	cfgPath := writeConfig(t, dir, port, true, false)
 
 	svc := New(Options{ConfigPath: cfgPath})
@@ -119,6 +119,39 @@ func TestServiceStartExposesHealthAndShutdownStopsHTTP(t *testing.T) {
 	defer cancel()
 	if err := svc.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("Shutdown returned error: %v", err)
+	}
+}
+
+func TestServiceWaitReturnsAfterShutdown(t *testing.T) {
+	dir := t.TempDir()
+	port := reserveHTTPListener(t)
+	cfgPath := writeConfig(t, dir, port, true, false)
+
+	svc := New(Options{ConfigPath: cfgPath})
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown returned error: %v", err)
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWait()
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- svc.Wait(waitCtx)
+	}()
+
+	select {
+	case err := <-waitDone:
+		if err != nil {
+			t.Fatalf("Wait returned error: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Wait did not return after Shutdown")
 	}
 }
 
@@ -149,6 +182,22 @@ func TestServiceWaitReturnsContextCancellation(t *testing.T) {
 	svc := New(Options{})
 	if err := svc.Wait(ctx); err != nil {
 		t.Fatalf("Wait returned %v, want nil on context cancellation", err)
+	}
+}
+
+func TestHTTPListenAddressNormalizesBracketedIPv6Host(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Host: "[::1]", Port: 8080}}
+	got := httpListenAddress(cfg)
+	if got != "[::1]:8080" {
+		t.Fatalf("httpListenAddress = %q, want normalized IPv6 listen address", got)
+	}
+}
+
+func TestHTTPListenAddressPreservesWildcardHost(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Host: "0.0.0.0", Port: 8080}}
+	got := httpListenAddress(cfg)
+	if got != "0.0.0.0:8080" {
+		t.Fatalf("httpListenAddress = %q, want wildcard listen address", got)
 	}
 }
 
@@ -348,6 +397,35 @@ func freePort(t *testing.T) int {
 	}
 	defer ln.Close()
 	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func reserveHTTPListener(t *testing.T) int {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	addr := net.JoinHostPort("127.0.0.1", fmt.Sprint(port))
+
+	originalListenTCP := listenTCP
+	used := false
+	listenTCP = func(network, address string) (net.Listener, error) {
+		if network == "tcp" && address == addr && !used {
+			used = true
+			return ln, nil
+		}
+		return originalListenTCP(network, address)
+	}
+	t.Cleanup(func() {
+		listenTCP = originalListenTCP
+		if !used {
+			_ = ln.Close()
+		}
+	})
+
+	return port
 }
 
 func httpGet(url string) (int, error) {

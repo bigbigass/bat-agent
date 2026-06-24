@@ -24,6 +24,8 @@ import (
 
 var ErrAlreadyStarted = errors.New("app service already started")
 
+var listenTCP = net.Listen
+
 type Options struct {
 	ConfigPath string
 }
@@ -43,6 +45,8 @@ type Service struct {
 	cancel      context.CancelFunc
 	srv         *http.Server
 	errCh       chan error
+	done        chan struct{}
+	doneOnce    sync.Once
 	httpBaseURL string
 }
 
@@ -91,15 +95,19 @@ func (s *Service) Start(parent context.Context) error {
 
 	ctx, cancel := context.WithCancel(parent)
 	errCh := make(chan error, 1)
+	done := make(chan struct{})
 	s.started = true
 	s.cfg = cfg
 	s.cfgPath = cfgPath
 	s.cancel = cancel
 	s.errCh = errCh
+	s.done = done
+	s.doneOnce = sync.Once{}
 	s.httpBaseURL = ""
 
 	fail := func(err error) error {
 		cancel()
+		s.closeDoneLocked()
 		s.resetLocked()
 		return err
 	}
@@ -125,8 +133,8 @@ func (s *Service) Start(parent context.Context) error {
 		authWrap := func(h http.Handler) http.Handler {
 			return auth.BasicAuth(cfg.Auth.Username, cfg.Auth.Password, h)
 		}
-		addr := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
-		ln, err := net.Listen("tcp", addr)
+		addr := httpListenAddress(cfg)
+		ln, err := listenTCP("tcp", addr)
 		if err != nil {
 			return fail(fmt.Errorf("listen http %s: %w", addr, err))
 		}
@@ -155,6 +163,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.mutex.Lock()
 	cancel := s.cancel
 	srv := s.srv
+	if cancel != nil {
+		cancel()
+	}
+	s.closeDoneLocked()
 	s.started = false
 	s.cancel = nil
 	s.srv = nil
@@ -162,9 +174,6 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.httpBaseURL = ""
 	s.mutex.Unlock()
 
-	if cancel != nil {
-		cancel()
-	}
 	if srv != nil {
 		return srv.Shutdown(ctx)
 	}
@@ -174,15 +183,18 @@ func (s *Service) Shutdown(ctx context.Context) error {
 func (s *Service) Wait(ctx context.Context) error {
 	s.mutex.Lock()
 	errCh := s.errCh
+	done := s.done
 	s.mutex.Unlock()
 
-	if errCh == nil {
+	if errCh == nil && done == nil {
 		<-ctx.Done()
 		return nil
 	}
 
 	select {
 	case <-ctx.Done():
+		return nil
+	case <-done:
 		return nil
 	case err := <-errCh:
 		return err
@@ -216,7 +228,27 @@ func (s *Service) resetLocked() {
 	s.cancel = nil
 	s.srv = nil
 	s.errCh = nil
+	s.done = nil
+	s.doneOnce = sync.Once{}
 	s.httpBaseURL = ""
+}
+
+func (s *Service) closeDoneLocked() {
+	closeDone(&s.doneOnce, s.done)
+}
+
+func closeDone(doneOnce *sync.Once, done chan struct{}) {
+	if done == nil {
+		return
+	}
+	doneOnce.Do(func() {
+		close(done)
+	})
+}
+
+func httpListenAddress(cfg *config.Config) string {
+	host := trimHostBrackets(strings.TrimSpace(cfg.Server.Host))
+	return net.JoinHostPort(host, strconv.Itoa(cfg.Server.Port))
 }
 
 func HTTPBaseURLForConfig(cfg *config.Config) string {
@@ -230,11 +262,15 @@ func localConnectHost(host string) string {
 	case "", "0.0.0.0", "::", "[::]":
 		return "127.0.0.1"
 	default:
-		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-			return strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
-		}
-		return host
+		return trimHostBrackets(host)
 	}
+}
+
+func trimHostBrackets(host string) string {
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		return strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	}
+	return host
 }
 
 func mqttConfigFromConfig(cfg *config.Config) mqttapi.Config {
