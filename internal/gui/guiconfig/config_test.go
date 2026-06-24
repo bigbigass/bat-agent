@@ -12,14 +12,51 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Mode != ModeLocal {
 		t.Fatalf("Mode = %q, want %q", cfg.Mode, ModeLocal)
 	}
-	if cfg.BaseURL != "http://127.0.0.1:8080" {
-		t.Fatalf("BaseURL = %q, want local default", cfg.BaseURL)
+	if cfg.BaseURL != "" {
+		t.Fatalf("BaseURL = %q, want empty local default", cfg.BaseURL)
 	}
-	if cfg.Username != "admin" {
-		t.Fatalf("Username = %q, want admin", cfg.Username)
+	if cfg.Username != "" {
+		t.Fatalf("Username = %q, want empty local default", cfg.Username)
 	}
 	if cfg.Password != "" {
 		t.Fatalf("Password = %q, want empty", cfg.Password)
+	}
+}
+
+func TestForSaveClearsLocalConnectionCredentials(t *testing.T) {
+	cfg := Config{
+		Mode:     ModeLocal,
+		BaseURL:  "http://old-local:8080",
+		Username: "admin",
+		Password: "change-me-please",
+	}
+
+	got := ForSave(cfg)
+	if got.Mode != ModeLocal {
+		t.Fatalf("Mode = %q, want local", got.Mode)
+	}
+	if got.BaseURL != "" {
+		t.Fatalf("BaseURL = %q, want empty", got.BaseURL)
+	}
+	if got.Username != "" {
+		t.Fatalf("Username = %q, want empty", got.Username)
+	}
+	if got.Password != "" {
+		t.Fatalf("Password = %q, want empty", got.Password)
+	}
+}
+
+func TestForSaveKeepsRemoteConnectionCredentials(t *testing.T) {
+	cfg := Config{
+		Mode:     ModeRemote,
+		BaseURL:  "http://10.0.0.5:8080",
+		Username: "alice",
+		Password: "secret-password",
+	}
+
+	got := ForSave(cfg)
+	if got != cfg {
+		t.Fatalf("ForSave remote = %#v, want %#v", got, cfg)
 	}
 }
 
