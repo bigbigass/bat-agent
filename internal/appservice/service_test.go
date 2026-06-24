@@ -3,6 +3,9 @@ package appservice
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +94,78 @@ func TestHTTPClientConfigUnavailableWhenHTTPDisabled(t *testing.T) {
 
 	if got, ok := svc.HTTPClientConfig(); ok {
 		t.Fatalf("HTTPClientConfig = %#v, want unavailable", got)
+	}
+}
+
+func TestServiceStartExposesHealthAndShutdownStopsHTTP(t *testing.T) {
+	dir := t.TempDir()
+	port := freePort(t)
+	cfgPath := writeConfig(t, dir, port, true, false)
+
+	svc := New(Options{ConfigPath: cfgPath})
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	resp, err := httpGet(svc.HTTPBaseURL() + "/health")
+	if err != nil {
+		t.Fatalf("GET /health returned error: %v", err)
+	}
+	if resp != http.StatusOK {
+		t.Fatalf("GET /health status = %d, want 200", resp)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := svc.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("Shutdown returned error: %v", err)
+	}
+}
+
+func TestServiceStartReturnsListenErrorWhenPortBusy(t *testing.T) {
+	dir := t.TempDir()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	cfgPath := writeConfig(t, dir, port, true, false)
+
+	svc := New(Options{ConfigPath: cfgPath})
+	err = svc.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start returned nil, want listen error")
+	}
+	if !strings.Contains(err.Error(), "listen http") {
+		t.Fatalf("Start error = %q, want listen context", err.Error())
+	}
+}
+
+func TestServiceWaitReturnsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	svc := New(Options{})
+	if err := svc.Wait(ctx); err != nil {
+		t.Fatalf("Wait returned %v, want nil on context cancellation", err)
+	}
+}
+
+func TestServiceStartValidatesConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("server:\n  port: 70000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := New(Options{ConfigPath: cfgPath})
+	err := svc.Start(context.Background())
+	if err == nil {
+		t.Fatal("Start returned nil, want config validation error")
+	}
+	if !strings.Contains(err.Error(), "server.port") {
+		t.Fatalf("Start error = %q, want server.port validation", err.Error())
 	}
 }
 
@@ -225,6 +300,63 @@ func TestMQTTConfigFromConfigMapsServiceFields(t *testing.T) {
 	if got != want {
 		t.Fatalf("mqttConfigFromConfig() = %#v, want %#v", got, want)
 	}
+}
+
+func writeConfig(t *testing.T, dir string, port int, httpEnabled bool, mqttEnabled bool) string {
+	t.Helper()
+
+	scriptDir := filepath.Join(dir, "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := fmt.Sprintf(`server:
+  host: 127.0.0.1
+  port: %d
+services:
+  http:
+    enabled: %t
+  mqtt:
+    enabled: %t
+    broker: "tcp://127.0.0.1:1883"
+    clientId: "deploy-agent-test"
+    commandTopic: "deploy-agent-test/run"
+    qos: 1
+auth:
+  username: admin
+  password: change-me-please
+runner:
+  timeoutSeconds: 300
+  scriptDir: %q
+preRun:
+  download:
+    script: ""
+    timeoutSeconds: 300
+`, port, httpEnabled, mqttEnabled, filepath.ToSlash(scriptDir))
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfgPath
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+func httpGet(url string) (int, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, nil
 }
 
 func writeTestScript(t *testing.T, dir, name, body string) string {

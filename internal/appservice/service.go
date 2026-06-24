@@ -1,18 +1,28 @@
 package appservice
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/liqixin/deploy-agent/internal/auth"
 	"github.com/liqixin/deploy-agent/internal/config"
 	"github.com/liqixin/deploy-agent/internal/executor"
+	"github.com/liqixin/deploy-agent/internal/httpapi"
 	"github.com/liqixin/deploy-agent/internal/mqttapi"
+	"github.com/liqixin/deploy-agent/internal/registry"
 )
+
+var ErrAlreadyStarted = errors.New("app service already started")
 
 type Options struct {
 	ConfigPath string
@@ -26,8 +36,13 @@ type HTTPClientConfig struct {
 
 type Service struct {
 	options     Options
+	mutex       sync.Mutex
+	started     bool
 	cfg         *config.Config
 	cfgPath     string
+	cancel      context.CancelFunc
+	srv         *http.Server
+	errCh       chan error
 	httpBaseURL string
 }
 
@@ -35,7 +50,155 @@ func New(options Options) *Service {
 	return &Service{options: options}
 }
 
+func (s *Service) Start(parent context.Context) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.started {
+		return ErrAlreadyStarted
+	}
+
+	cfgPath := s.options.ConfigPath
+	if cfgPath == "" {
+		var err error
+		cfgPath, err = FindConfig()
+		if err != nil {
+			s.resetLocked()
+			return err
+		}
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		s.resetLocked()
+		return err
+	}
+	log.Printf("loaded config from %s", cfgPath)
+
+	scriptDir, err := cfg.ResolveScriptDir()
+	if err != nil {
+		s.resetLocked()
+		return fmt.Errorf("resolve scriptDir: %w", err)
+	}
+
+	reg, err := registry.New(scriptDir)
+	if err != nil {
+		s.resetLocked()
+		return err
+	}
+	log.Printf("script dir: %s", reg.Dir())
+	log.Printf("discovered %d script(s): %v", len(reg.List()), reg.List())
+
+	ctx, cancel := context.WithCancel(parent)
+	errCh := make(chan error, 1)
+	s.started = true
+	s.cfg = cfg
+	s.cfgPath = cfgPath
+	s.cancel = cancel
+	s.errCh = errCh
+	s.httpBaseURL = ""
+
+	fail := func(err error) error {
+		cancel()
+		s.resetLocked()
+		return err
+	}
+
+	go reg.WatchRescan(ctx, 60*time.Second)
+
+	timeout := time.Duration(cfg.Runner.TimeoutSeconds) * time.Second
+	execOptions, err := executorOptionsFromConfig(cfg, cfgPath)
+	if err != nil {
+		return fail(err)
+	}
+	exec := executor.New(reg, timeout, execOptions...)
+
+	if cfg.Services.MQTT.Enabled {
+		mqttClient := mqttapi.NewClient(mqttConfigFromConfig(cfg), exec)
+		if err := mqttClient.Start(ctx); err != nil {
+			return fail(fmt.Errorf("start mqtt: %w", err))
+		}
+	}
+
+	if cfg.Services.HTTP.Enabled {
+		api := httpapi.New(exec)
+		authWrap := func(h http.Handler) http.Handler {
+			return auth.BasicAuth(cfg.Auth.Username, cfg.Auth.Password, h)
+		}
+		addr := net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fail(fmt.Errorf("listen http %s: %w", addr, err))
+		}
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           api.Routes(authWrap),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		s.srv = srv
+		s.httpBaseURL = HTTPBaseURLForConfig(cfg)
+		go func() {
+			log.Printf("deploy-agent http listening on %s (timeout %s)", addr, timeout)
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
+		}()
+	}
+
+	return nil
+}
+
+func (s *Service) Shutdown(ctx context.Context) error {
+	s.mutex.Lock()
+	cancel := s.cancel
+	srv := s.srv
+	s.started = false
+	s.cancel = nil
+	s.srv = nil
+	s.errCh = nil
+	s.httpBaseURL = ""
+	s.mutex.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if srv != nil {
+		return srv.Shutdown(ctx)
+	}
+	return nil
+}
+
+func (s *Service) Wait(ctx context.Context) error {
+	s.mutex.Lock()
+	errCh := s.errCh
+	s.mutex.Unlock()
+
+	if errCh == nil {
+		<-ctx.Done()
+		return nil
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		return err
+	}
+}
+
+func (s *Service) HTTPBaseURL() string {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	return s.httpBaseURL
+}
+
 func (s *Service) HTTPClientConfig() (HTTPClientConfig, bool) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
 	if s.cfg == nil || !s.cfg.Services.HTTP.Enabled || s.httpBaseURL == "" {
 		return HTTPClientConfig{}, false
 	}
@@ -44,6 +207,16 @@ func (s *Service) HTTPClientConfig() (HTTPClientConfig, bool) {
 		Username: s.cfg.Auth.Username,
 		Password: s.cfg.Auth.Password,
 	}, true
+}
+
+func (s *Service) resetLocked() {
+	s.started = false
+	s.cfg = nil
+	s.cfgPath = ""
+	s.cancel = nil
+	s.srv = nil
+	s.errCh = nil
+	s.httpBaseURL = ""
 }
 
 func HTTPBaseURLForConfig(cfg *config.Config) string {
