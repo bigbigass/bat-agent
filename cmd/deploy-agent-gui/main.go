@@ -66,6 +66,7 @@ func main() {
 	state.setStatus("服务启动中...")
 
 	w.SetContent(state.buildUI())
+	state.installTray(a, w)
 	state.startEmbeddedService()
 	w.ShowAndRun()
 }
