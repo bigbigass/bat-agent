@@ -57,6 +57,11 @@ func (c *trayController) exit() {
 }
 
 func (s *guiState) installTray(a fyne.App, w fyne.Window) {
+	desktopApp, ok := a.(desktop.App)
+	if !ok {
+		return
+	}
+
 	controller := &trayController{
 		hide:  w.Hide,
 		show:  w.Show,
@@ -76,10 +81,6 @@ func (s *guiState) installTray(a fyne.App, w fyne.Window) {
 	}
 	w.SetCloseIntercept(controller.interceptClose)
 
-	desktopApp, ok := a.(desktop.App)
-	if !ok {
-		return
-	}
 	desktopApp.SetSystemTrayWindow(w)
 	desktopApp.SetSystemTrayMenu(fyne.NewMenu("deploy-agent",
 		fyne.NewMenuItem("打开", controller.open),
