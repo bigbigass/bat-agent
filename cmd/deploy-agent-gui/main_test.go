@@ -7,6 +7,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"fyne.io/fyne/v2/widget"
 	"github.com/liqixin/deploy-agent/internal/appservice"
 	"github.com/liqixin/deploy-agent/internal/gui/apiclient"
 	"github.com/liqixin/deploy-agent/internal/gui/guiconfig"
@@ -135,6 +136,27 @@ func TestPreDownloadInputsReadyRequiresEnabledInputs(t *testing.T) {
 	}
 	if !preDownloadInputsReady(true, " ProjectA ", " app.zip ") {
 		t.Fatal("preDownloadInputsReady = false, want true with trimmed project and artifact")
+	}
+}
+
+func TestUpdateModeControlsTogglesRemoteFields(t *testing.T) {
+	remoteFields := widget.NewLabel("remote connection fields")
+	state := &guiState{
+		config:       guiconfig.Config{Mode: guiconfig.ModeLocal},
+		remoteFields: remoteFields,
+	}
+
+	state.updateModeControls()
+
+	if remoteFields.Visible() {
+		t.Fatal("remote fields are visible in local mode, want hidden")
+	}
+
+	state.config.Mode = guiconfig.ModeRemote
+	state.updateModeControls()
+
+	if !remoteFields.Visible() {
+		t.Fatal("remote fields are hidden in remote mode, want visible")
 	}
 }
 

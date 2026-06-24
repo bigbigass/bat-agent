@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -14,16 +13,17 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/widget"
+	"github.com/liqixin/deploy-agent/internal/appservice"
 	"github.com/liqixin/deploy-agent/internal/gui/apiclient"
 	"github.com/liqixin/deploy-agent/internal/gui/guiconfig"
-	"github.com/liqixin/deploy-agent/internal/gui/localservice"
 )
 
 type guiState struct {
-	configPath string
-	config     guiconfig.Config
-	client     *apiclient.Client
-	service    *localservice.Manager
+	configPath   string
+	config       guiconfig.Config
+	client       *apiclient.Client
+	service      *appservice.Service
+	remoteFields fyne.CanvasObject
 
 	statusText binding.String
 	outputText binding.String
@@ -31,8 +31,6 @@ type guiState struct {
 
 	scriptSelect *widget.Select
 	runButton    *widget.Button
-	startButton  *widget.Button
-	stopButton   *widget.Button
 
 	preDownloadCheck *widget.Check
 	projectEntry     *widget.Entry
@@ -57,25 +55,26 @@ func main() {
 		cfg = guiconfig.Default()
 	}
 
-	exe, _ := os.Executable()
 	state := &guiState{
 		configPath: cfgPath,
 		config:     cfg,
-		service:    localservice.New(localservice.AgentPath(exe)),
+		service:    appservice.New(appservice.Options{}),
 		statusText: binding.NewString(),
 		outputText: binding.NewString(),
 		history:    binding.NewStringList(),
 	}
-	state.setStatus("未连接")
+	state.setStatus("服务启动中...")
 
 	w.SetContent(state.buildUI())
+	state.startEmbeddedService()
 	w.ShowAndRun()
 }
 
 func (s *guiState) buildUI() fyne.CanvasObject {
 	mode := widget.NewSelect([]string{guiconfig.ModeLocal, guiconfig.ModeRemote}, func(value string) {
 		s.config.Mode = value
-		s.updateLocalButtons()
+		s.updateModeControls()
+		s.updateRunButton()
 	})
 
 	baseURL := widget.NewEntry()
@@ -98,14 +97,12 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 
 	connect := widget.NewButton("连接", s.connect)
 	save := widget.NewButton("保存配置", func() {
-		if err := guiconfig.Save(s.configPath, s.config); err != nil {
+		if err := guiconfig.Save(s.configPath, guiconfig.ForSave(s.config)); err != nil {
 			s.setStatus("保存配置失败: " + err.Error())
 			return
 		}
 		s.setStatus("配置已保存")
 	})
-	s.startButton = widget.NewButton("启动服务", s.startLocalService)
-	s.stopButton = widget.NewButton("停止服务", s.stopLocalService)
 
 	s.preDownloadCheck = widget.NewCheck("执行前下载", func(bool) {
 		s.updatePreDownloadInputs()
@@ -145,17 +142,17 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 		},
 	)
 
-	connectionForm := widget.NewForm(
-		widget.NewFormItem("模式", mode),
+	modeForm := widget.NewForm(widget.NewFormItem("模式", mode))
+	s.remoteFields = widget.NewForm(
 		widget.NewFormItem("服务地址", baseURL),
 		widget.NewFormItem("用户名", username),
 		widget.NewFormItem("密码", password),
 	)
 	mode.SetSelected(s.config.Mode)
-	s.updateLocalButtons()
+	s.updateModeControls()
 
-	actions := container.NewHBox(connect, save, s.startButton, s.stopButton)
-	top := container.NewBorder(nil, nil, nil, actions, connectionForm)
+	actions := container.NewHBox(connect, save)
+	top := container.NewBorder(nil, nil, nil, actions, container.NewVBox(modeForm, s.remoteFields))
 	runForm := widget.NewForm(
 		widget.NewFormItem("", s.preDownloadCheck),
 		widget.NewFormItem("项目编号", s.projectEntry),
@@ -180,7 +177,12 @@ func (s *guiState) connectWithRetry(attempts int, delay time.Duration, status st
 	s.connectSeq++
 	seq := s.connectSeq
 	s.setStatus(status)
-	client := apiclient.New(s.config.BaseURL, s.config.Username, s.config.Password)
+	clientCfg, err := clientConfigForMode(s.config.Mode, s.config, s.service)
+	if err != nil {
+		s.setStatus(err.Error())
+		return
+	}
+	client := apiclient.New(clientCfg.BaseURL, clientCfg.Username, clientCfg.Password)
 	s.client = nil
 	s.refreshSeq++
 	s.updateRunButton()
@@ -361,17 +363,33 @@ func (s *guiState) updatePreDownloadInputs() {
 	s.artifactEntry.Disable()
 }
 
-func (s *guiState) updateLocalButtons() {
-	if s.startButton == nil || s.stopButton == nil {
+func (s *guiState) startEmbeddedService() {
+	go func() {
+		err := s.service.Start(context.Background())
+		fyne.Do(func() {
+			if err != nil {
+				s.setStatus("服务启动失败: " + err.Error())
+				s.updateRunButton()
+				return
+			}
+			if s.config.Mode == guiconfig.ModeLocal {
+				s.connectWithRetry(20, 500*time.Millisecond, "服务已启动，连接中...")
+				return
+			}
+			s.setStatus("服务已启动")
+		})
+	}()
+}
+
+func (s *guiState) updateModeControls() {
+	if s.remoteFields == nil {
 		return
 	}
 	if s.config.Mode == guiconfig.ModeLocal {
-		s.startButton.Enable()
-		s.stopButton.Enable()
+		s.remoteFields.Hide()
 		return
 	}
-	s.startButton.Disable()
-	s.stopButton.Disable()
+	s.remoteFields.Show()
 }
 
 func (s *guiState) handleEvent(event apiclient.StreamEvent) {
@@ -394,53 +412,6 @@ func (s *guiState) handleEvent(event apiclient.StreamEvent) {
 		s.setStatus(fmt.Sprintf("%s: %s exitCode=%d durationMs=%d", status, event.Script, event.ExitCode, event.DurationMs))
 		s.addHistory(fmt.Sprintf("%s %s exitCode=%d durationMs=%d", event.Script, status, event.ExitCode, event.DurationMs))
 	}
-}
-
-func (s *guiState) startLocalService() {
-	if s.config.Mode != guiconfig.ModeLocal {
-		s.setStatus("远程模式不管理本机服务")
-		return
-	}
-	s.setStatus("启动服务中...")
-	go func() {
-		err := s.service.Start(context.Background())
-		fyne.Do(func() {
-			if err != nil {
-				s.setStatus("启动服务失败: " + err.Error())
-				return
-			}
-			s.connectWithRetry(20, 500*time.Millisecond, fmt.Sprintf("服务已启动 PID=%d，连接中...", s.service.PID()))
-		})
-	}()
-}
-
-func (s *guiState) stopLocalService() {
-	if s.config.Mode != guiconfig.ModeLocal {
-		s.setStatus("远程模式不管理本机服务")
-		return
-	}
-	go func() {
-		stopped, err := s.service.Stop()
-		fyne.Do(func() {
-			if stopped {
-				s.client = nil
-				s.connectSeq++
-				s.refreshSeq++
-				s.clearScripts()
-				if err != nil {
-					s.setStatus("服务已停止，但进程树清理失败: " + err.Error())
-					return
-				}
-				s.setStatus("服务已停止")
-				return
-			}
-			if err != nil {
-				s.setStatus("停止服务失败: " + err.Error())
-				return
-			}
-			s.setStatus("未停止：服务不是由 GUI 启动")
-		})
-	}()
 }
 
 func (s *guiState) setStatus(value string) {
