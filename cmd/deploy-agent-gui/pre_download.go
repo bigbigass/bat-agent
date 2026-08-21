@@ -20,6 +20,7 @@ func preDownloadOptions(enabled bool, project string, artifact string) (apiclien
 		return apiclient.RunStreamOptions{}, fmt.Errorf("请填写产物文件名")
 	}
 	return apiclient.RunStreamOptions{
+		Args: []string{project, artifact},
 		PreDownload: apiclient.PreDownloadOptions{
 			Enabled:  true,
 			Project:  project,

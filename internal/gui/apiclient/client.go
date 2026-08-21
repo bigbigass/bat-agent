@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -15,6 +16,13 @@ import (
 const (
 	EventOutput = "output"
 	EventFinal  = "final"
+
+	DownloadStateQueued      = "queued"
+	DownloadStateDownloading = "downloading"
+	DownloadStateVerifying   = "verifying"
+	DownloadStateCompleted   = "completed"
+	DownloadStateFailed      = "failed"
+	DownloadStateCancelled   = "cancelled"
 )
 
 type Client struct {
@@ -38,6 +46,7 @@ type StreamEvent struct {
 }
 
 type RunStreamOptions struct {
+	Args        []string
 	PreDownload PreDownloadOptions
 }
 
@@ -49,12 +58,54 @@ type PreDownloadOptions struct {
 
 type runStreamRequest struct {
 	Script      string              `json:"script"`
+	Args        []string            `json:"args,omitempty"`
 	PreDownload *PreDownloadOptions `json:"preDownload,omitempty"`
 }
 
 type HTTPError struct {
 	StatusCode int
 	Message    string
+}
+
+// ReleaseManifest is the release information exposed by the service. Resource
+// URLs are intentionally not part of this client DTO: downloads are started by
+// resource identity and signed URLs must never be handed to the GUI.
+type ReleaseManifest struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	Product       string    `json:"product"`
+	LatestVersion string    `json:"latestVersion"`
+	GeneratedAt   time.Time `json:"generatedAt"`
+	Releases      []Release `json:"releases"`
+}
+
+type Release struct {
+	Version     string     `json:"version"`
+	PublishedAt time.Time  `json:"publishedAt"`
+	Resources   []Resource `json:"resources"`
+}
+
+type Resource struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+type DownloadInfo struct {
+	TaskID              string  `json:"taskId"`
+	State               string  `json:"state"`
+	Version             string  `json:"version"`
+	ResourceID          string  `json:"resourceId"`
+	Name                string  `json:"name"`
+	Kind                string  `json:"kind"`
+	Phase               string  `json:"phase"`
+	BytesDone           int64   `json:"bytesDone"`
+	TotalBytes          int64   `json:"totalBytes"`
+	Percent             float64 `json:"percent"`
+	SpeedBytesPerSecond float64 `json:"speedBytesPerSecond"`
+	Destination         string  `json:"destination"`
+	Error               string  `json:"error"`
 }
 
 func (e HTTPError) Error() string {
@@ -112,12 +163,113 @@ func (c *Client) Scripts(ctx context.Context) ([]string, error) {
 	return body.Scripts, nil
 }
 
+func (c *Client) Releases(ctx context.Context) (*ReleaseManifest, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/releases", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeHTTPError(resp)
+	}
+	var manifest ReleaseManifest
+	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func (c *Client) RefreshReleases(ctx context.Context) (*ReleaseManifest, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/releases/refresh", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, decodeHTTPError(resp)
+	}
+	var manifest ReleaseManifest
+	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func (c *Client) StartDownload(ctx context.Context, version, resourceID string) (DownloadInfo, error) {
+	body, err := json.Marshal(struct {
+		Version    string `json:"version"`
+		ResourceID string `json:"resourceId"`
+	}{version, resourceID})
+	if err != nil {
+		return DownloadInfo{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/downloads", bytes.NewReader(body))
+	if err != nil {
+		return DownloadInfo{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setAuth(req)
+	return c.decodeDownloadResponse(req)
+}
+
+func (c *Client) DownloadStatus(ctx context.Context, id string) (DownloadInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/downloads/"+url.PathEscape(id), nil)
+	if err != nil {
+		return DownloadInfo{}, err
+	}
+	c.setAuth(req)
+	return c.decodeDownloadResponse(req)
+}
+
+func (c *Client) CancelDownload(ctx context.Context, id string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/downloads/"+url.PathEscape(id)+"/cancel", nil)
+	if err != nil {
+		return err
+	}
+	c.setAuth(req)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return decodeHTTPError(resp)
+	}
+	return nil
+}
+
+func (c *Client) decodeDownloadResponse(req *http.Request) (DownloadInfo, error) {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return DownloadInfo{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return DownloadInfo{}, decodeHTTPError(resp)
+	}
+	var info DownloadInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return DownloadInfo{}, err
+	}
+	return info, nil
+}
+
 func (c *Client) RunStream(ctx context.Context, script string, onEvent func(StreamEvent)) error {
 	return c.RunStreamWithOptions(ctx, script, RunStreamOptions{}, onEvent)
 }
 
 func (c *Client) RunStreamWithOptions(ctx context.Context, script string, opts RunStreamOptions, onEvent func(StreamEvent)) error {
-	reqBody := runStreamRequest{Script: script}
+	reqBody := runStreamRequest{Script: script, Args: opts.Args}
 	if opts.PreDownload.Enabled {
 		preDownload := opts.PreDownload
 		reqBody.PreDownload = &preDownload

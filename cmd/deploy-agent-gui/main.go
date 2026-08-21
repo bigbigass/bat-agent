@@ -39,6 +39,36 @@ type guiState struct {
 	connectSeq int
 	refreshSeq int
 	running    bool
+
+	// Download-center widgets are kept on guiState so a future client refresh can
+	// update them without rebuilding the script page.
+	downloadVersion      *widget.Select
+	downloadLatest       *widget.Label
+	downloadUpdated      *widget.Label
+	downloadRefresh      *widget.Button
+	downloadCancel       *widget.Button
+	downloadRetry        *widget.Button
+	downloadStatus       *widget.Label
+	downloadEmpty        *widget.Label
+	downloadResources    *widget.List
+	downloadProgress     *widget.ProgressBar
+	downloadTaskResource *widget.Label
+	downloadPhase        *widget.Label
+	downloadProgressText *widget.Label
+	downloadSpeed        *widget.Label
+	downloadDestination  *widget.Label
+	downloadError        *widget.Label
+	downloadManifest     *apiclient.ReleaseManifest
+	downloadItems        []apiclient.Resource
+	downloadTaskID       string
+	downloadState        string
+	downloadLastVersion  string
+	downloadLastResource string
+	downloadPollCancel   context.CancelFunc
+	downloadCatalogSeq   int
+	downloadTaskSeq      int
+	downloadLoading      bool
+	downloadCancelling   bool
 }
 
 func main() {
@@ -73,7 +103,15 @@ func main() {
 
 func (s *guiState) buildUI() fyne.CanvasObject {
 	mode := widget.NewSelect([]string{guiconfig.ModeLocal, guiconfig.ModeRemote}, func(value string) {
+		changed := s.config.Mode != value
 		s.config.Mode = value
+		if changed {
+			s.client = nil
+			s.connectSeq++
+			s.refreshSeq++
+			s.clearScripts()
+			s.resetDownloadCenter("模式已切换，请重新连接服务")
+		}
 		s.updateModeControls()
 		s.updateRunButton()
 	})
@@ -164,7 +202,11 @@ func (s *guiState) buildUI() fyne.CanvasObject {
 	mainSplit := container.NewHSplit(scripts, runInfo)
 	mainSplit.Offset = 0.25
 
-	return container.NewBorder(top, container.NewVBox(widget.NewLabel("最近执行"), history), nil, nil, mainSplit)
+	scriptPage := container.NewBorder(top, container.NewVBox(widget.NewLabel("最近执行"), history), nil, nil, mainSplit)
+	return container.NewAppTabs(
+		container.NewTabItem("脚本执行", scriptPage),
+		container.NewTabItem("下载中心", s.buildDownloadCenter()),
+	)
 }
 
 func (s *guiState) connect() {
@@ -178,6 +220,7 @@ func (s *guiState) connectWithRetry(attempts int, delay time.Duration, status st
 	s.connectSeq++
 	seq := s.connectSeq
 	s.setStatus(status)
+	s.resetDownloadCenter("连接服务后加载发布清单")
 	clientCfg, err := clientConfigForMode(s.config.Mode, s.config, s.service)
 	if err != nil {
 		s.setStatus(err.Error())
@@ -219,6 +262,7 @@ func (s *guiState) connectWithRetry(attempts int, delay time.Duration, status st
 			s.client = client
 			s.applyScripts(scripts)
 			s.setStatus(fmt.Sprintf("已连接，已加载 %d 个脚本", len(scripts)))
+			s.loadDownloadReleases(false)
 		})
 	}()
 }

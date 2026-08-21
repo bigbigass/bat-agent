@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/liqixin/deploy-agent/internal/executor"
 	"github.com/liqixin/deploy-agent/internal/mqttapi"
 	"github.com/liqixin/deploy-agent/internal/registry"
+	"github.com/liqixin/deploy-agent/internal/releasecatalog"
 )
 
 func TestHTTPBaseURLForConfigUsesLoopbackForWildcardHosts(t *testing.T) {
@@ -218,6 +220,83 @@ func TestServiceStartValidatesConfig(t *testing.T) {
 	}
 }
 
+func TestReleaseServicesLoadManifestAndDownloadToConfigRelativeDir(t *testing.T) {
+	var serverURL string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/artifact" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("abc"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schemaVersion":1,"product":"deploy-agent","latestVersion":"2026.08.19","generatedAt":"2026-08-19T10:00:00Z","releases":[{"version":"2026.08.19","publishedAt":"2026-08-19T09:30:00Z","resources":[{"id":"api","kind":"component","name":"api.zip","url":"` + serverURL + `/artifact","size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]}]}`))
+	}))
+	defer server.Close()
+	serverURL = server.URL
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	configDir := t.TempDir()
+	cfg := &config.Config{Release: config.ReleaseConfig{
+		Enabled: true, ManifestURL: server.URL + "/manifest.json", DownloadDir: "downloads", RefreshSeconds: 3600,
+	}}
+	catalog, manager, err := releaseServicesFromConfig(ctx, cfg, filepath.Join(configDir, "config.yaml"), server.Client(), server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := catalog.Manifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.LatestVersion != "2026.08.19" || manifest.Releases[0].Resources[0].URL != "" {
+		t.Fatalf("unexpected public manifest: %#v", manifest)
+	}
+	started, err := manager.Start("2026.08.19", "api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		info, getErr := manager.Get(started.TaskID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if info.State == "completed" {
+			if info.Destination != filepath.Join(configDir, "downloads", "2026.08.19", "api.zip") {
+				t.Fatalf("destination = %q", info.Destination)
+			}
+			return
+		}
+		if info.State == "failed" {
+			t.Fatalf("download failed: %s", info.Error)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("download did not complete")
+}
+
+func TestReleaseServicesKeepUnavailableCatalogWithoutFailingSetup(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := &config.Config{Release: config.ReleaseConfig{
+		Enabled: true, ManifestURL: server.URL + "/manifest.json", DownloadDir: t.TempDir(), RefreshSeconds: 3600,
+	}}
+	catalog, manager, err := releaseServicesFromConfig(ctx, cfg, filepath.Join(t.TempDir(), "config.yaml"), server.Client(), server.Client())
+	if err != nil {
+		t.Fatalf("unavailable manifest should not fail setup: %v", err)
+	}
+	if manager == nil {
+		t.Fatal("download manager is nil")
+	}
+	if _, err := catalog.Manifest(); !errors.Is(err, releasecatalog.ErrUnavailable) {
+		t.Fatalf("Manifest error = %v, want unavailable", err)
+	}
+}
+
 func TestExecutorOptionsFromConfigMapsPreRunDownload(t *testing.T) {
 	configDir := t.TempDir()
 	writeTestScript(t, configDir, filepath.Join("tools", "download_simple.bat"), "@echo off\r\necho download %~1 %~2\r\n")
@@ -262,6 +341,47 @@ func TestExecutorOptionsFromConfigMapsPreRunDownload(t *testing.T) {
 	}
 	if !strings.Contains(res.Stdout, "target") {
 		t.Fatalf("Stdout = %q, want target output", res.Stdout)
+	}
+}
+
+func TestExecutorOptionsFromConfigUsesDefaultDownloadScript(t *testing.T) {
+	configDir := t.TempDir()
+	writeTestScript(t, configDir, filepath.Join("tools", "download_simple.bat"), "@echo off\r\necho default-download %~1 %~2\r\n")
+	cfgPath := filepath.Join(configDir, "config.yaml")
+	cfg := &config.Config{}
+
+	opts, err := executorOptionsFromConfig(cfg, cfgPath)
+	if err != nil {
+		t.Fatalf("executorOptionsFromConfig returned error: %v", err)
+	}
+	if len(opts) != 1 {
+		t.Fatalf("options len = %d, want 1", len(opts))
+	}
+
+	regDir := t.TempDir()
+	writeTestScript(t, regDir, "deploy.bat", "@echo off\r\necho target %~1 %~2\r\n")
+	reg, err := registry.New(regDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := executor.New(reg, 5*time.Second, opts...)
+
+	res, err := exec.RunCollectWithOptions(context.Background(), "deploy.bat", executor.RunOptions{
+		Args: []string{"ProjectA", "app.zip"},
+		PreDownload: executor.PreDownloadRequest{
+			Enabled:  true,
+			Project:  "ProjectA",
+			Artifact: "app.zip",
+		},
+	})
+	if err != nil {
+		t.Fatalf("RunCollectWithOptions returned error: %v", err)
+	}
+	if !strings.Contains(res.Stdout, "default-download ProjectA app.zip") {
+		t.Fatalf("Stdout = %q, want default download output", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "target ProjectA app.zip") {
+		t.Fatalf("Stdout = %q, want target args output", res.Stdout)
 	}
 }
 

@@ -16,10 +16,12 @@ import (
 
 	"github.com/liqixin/deploy-agent/internal/auth"
 	"github.com/liqixin/deploy-agent/internal/config"
+	"github.com/liqixin/deploy-agent/internal/downloadtask"
 	"github.com/liqixin/deploy-agent/internal/executor"
 	"github.com/liqixin/deploy-agent/internal/httpapi"
 	"github.com/liqixin/deploy-agent/internal/mqttapi"
 	"github.com/liqixin/deploy-agent/internal/registry"
+	"github.com/liqixin/deploy-agent/internal/releasecatalog"
 )
 
 var ErrAlreadyStarted = errors.New("app service already started")
@@ -130,6 +132,13 @@ func (s *Service) Start(parent context.Context) error {
 
 	if cfg.Services.HTTP.Enabled {
 		api := httpapi.New(exec)
+		if cfg.Release.Enabled && strings.TrimSpace(cfg.Release.ManifestURL) != "" {
+			catalog, downloads, err := releaseServicesFromConfig(ctx, cfg, cfgPath, &http.Client{Timeout: 10 * time.Second}, &http.Client{})
+			if err != nil {
+				return fail(err)
+			}
+			api = httpapi.New(exec, catalog, downloads)
+		}
 		authWrap := func(h http.Handler) http.Handler {
 			return auth.BasicAuth(cfg.Auth.Username, cfg.Auth.Password, h)
 		}
@@ -157,6 +166,54 @@ func (s *Service) Start(parent context.Context) error {
 	}
 
 	return nil
+}
+
+func releaseServicesFromConfig(ctx context.Context, cfg *config.Config, cfgPath string, manifestClient, downloadClient *http.Client) (*releasecatalog.Catalog, *downloadtask.Manager, error) {
+	downloadDir, err := cfg.ResolveReleaseDownloadDir(cfgPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve release.downloadDir: %w", err)
+	}
+	catalog, err := releasecatalog.New(cfg.Release.ManifestURL, manifestClient)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create release catalog: %w", err)
+	}
+	downloads, err := downloadtask.New(ctx, downloadDir, catalog, downloadClient)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create release download manager: %w", err)
+	}
+
+	// Keep startup bounded: an unavailable release host must not prevent the
+	// script service from becoming ready. A later manual or scheduled refresh
+	// can populate the catalog.
+	refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	refreshErr := catalog.Refresh(refreshCtx)
+	cancel()
+	if refreshErr != nil {
+		log.Printf("initial release manifest refresh failed; downloads remain unavailable until a refresh succeeds: %v", refreshErr)
+	}
+	go refreshReleaseCatalog(ctx, catalog, time.Duration(cfg.Release.RefreshSeconds)*time.Second)
+	return catalog, downloads, nil
+}
+
+func refreshReleaseCatalog(ctx context.Context, catalog *releasecatalog.Catalog, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			err := catalog.Refresh(refreshCtx)
+			cancel()
+			if err != nil {
+				log.Printf("release manifest refresh failed; keeping cached manifest: %v", err)
+			}
+		}
+	}
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {
@@ -290,12 +347,23 @@ func executorOptionsFromConfig(cfg *config.Config, cfgPath string) ([]executor.O
 		return nil, fmt.Errorf("resolve preRun.download.script: %w", err)
 	}
 	if downloadScript == "" {
-		return nil, nil
+		defaultScript := filepath.Join(filepath.Dir(cfgPath), "tools", "download_simple.bat")
+		if _, err := os.Stat(defaultScript); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("stat default preRun.download.script: %w", err)
+		}
+		downloadScript = defaultScript
+	}
+	timeoutSeconds := cfg.PreRun.Download.TimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 300
 	}
 	return []executor.Option{
 		executor.WithPreDownloadConfig(executor.PreDownloadConfig{
 			ScriptPath: downloadScript,
-			Timeout:    time.Duration(cfg.PreRun.Download.TimeoutSeconds) * time.Second,
+			Timeout:    time.Duration(timeoutSeconds) * time.Second,
 		}),
 	}, nil
 }

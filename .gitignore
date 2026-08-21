@@ -1,5 +1,6 @@
 # Local runtime config and secrets
 config.yaml
+config..yaml
 .env
 .env.*
 
@@ -28,3 +29,8 @@ create-test-file.bat
 .worktrees/
 .vscode/
 .idea/
+
+# Local downloader credentials, state, and artifacts
+tools/cookie.ini
+tools/.config/
+tools/download/

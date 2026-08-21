@@ -128,6 +128,7 @@ func TestStableErrorText(t *testing.T) {
 		ErrScriptBusy:                "script is already running",
 		ErrRunnerStart:               "runner start failed",
 		ErrScriptTimedOut:            "script timed out",
+		ErrInvalidScriptArg:          "invalid script argument",
 		ErrPreDownloadNotConfigured:  "pre-run download is not configured",
 		ErrInvalidPreDownloadRequest: "invalid pre-run download request",
 		ErrPreDownloadFailed:         "pre-run download failed",
@@ -167,6 +168,27 @@ func TestRunCollectCapturesOutput(t *testing.T) {
 	}
 	if res.TimedOut {
 		t.Fatal("TimedOut = true, want false")
+	}
+}
+
+func TestRunCollectWithOptionsPassesArgsToTargetScript(t *testing.T) {
+	reg := makeRegistry(t, map[string]string{"deploy.bat": "@echo off\r\necho project=%~1\r\necho artifact=%~2\r\n"})
+	exec := New(reg, 5*time.Second)
+
+	res, err := exec.RunCollectWithOptions(context.Background(), "deploy.bat", RunOptions{
+		Args: []string{"ProjectA", "app.zip"},
+	})
+	if err != nil {
+		t.Fatalf("RunCollectWithOptions returned error: %v", err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", res.ExitCode)
+	}
+	if !strings.Contains(res.Stdout, "project=ProjectA") {
+		t.Fatalf("Stdout = %q, want project argument", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "artifact=app.zip") {
+		t.Fatalf("Stdout = %q, want artifact argument", res.Stdout)
 	}
 }
 
@@ -212,7 +234,7 @@ func TestRunCollectNonZeroExitCodeReturnsResultWithoutError(t *testing.T) {
 func TestRunStreamWithOptionsRunsDownloadBeforeTarget(t *testing.T) {
 	dir := t.TempDir()
 	download := writeScript(t, dir, "download.bat", "@echo off\r\necho download %~1 %~2\r\n")
-	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target\r\n")
+	writeScript(t, dir, "deploy.bat", "@echo off\r\necho target %~1 %~2\r\n")
 	reg, err := registry.New(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -223,6 +245,7 @@ func TestRunStreamWithOptionsRunsDownloadBeforeTarget(t *testing.T) {
 	}))
 
 	res, err := exec.RunStreamWithOptions(context.Background(), "deploy.bat", RunOptions{
+		Args:        []string{"ProjectA", "app.zip"},
 		PreDownload: PreDownloadRequest{Enabled: true, Project: "ProjectA", Artifact: "app.zip"},
 	}, nil)
 	if err != nil {
@@ -234,8 +257,8 @@ func TestRunStreamWithOptionsRunsDownloadBeforeTarget(t *testing.T) {
 	if !strings.Contains(res.Stdout, "download ProjectA app.zip") {
 		t.Fatalf("Stdout = %q, want download output", res.Stdout)
 	}
-	if !strings.Contains(res.Stdout, "target") {
-		t.Fatalf("Stdout = %q, want target output", res.Stdout)
+	if !strings.Contains(res.Stdout, "target ProjectA app.zip") {
+		t.Fatalf("Stdout = %q, want target args output", res.Stdout)
 	}
 	if strings.Index(res.Stdout, "download") > strings.Index(res.Stdout, "target") {
 		t.Fatalf("Stdout = %q, want download before target", res.Stdout)

@@ -27,9 +27,18 @@ runner:
 
 preRun:
   download:
-    # 执行脚本前的下载工具；留空 = 禁用前置下载
-    # 示例路径不是内置文件；请在部署目录自行提供该脚本及所需工具/凭据
+    # 执行脚本前的下载工具；留空 = 自动使用 config.yaml 同目录的 tools/download_simple.bat（如存在）
+    # 下载脚本不是内置文件；请在部署目录自行提供该脚本及所需工具/凭据
     # 相对路径基于 config.yaml 所在目录解析
-    script: "tools/download_simple.bat"
+    script: ""
     # 下载步骤最大执行时间（秒），只作用于前置下载
     timeoutSeconds: 300
+
+release:
+  # 从 HTTPS 清单地址周期性获取可用版本；禁用时不访问清单
+  enabled: false
+  # enabled=true 时必须填写稳定的 HTTPS manifest 地址；留空则保持功能关闭
+  manifestURL: "https://example.invalid/deploy-agent/releases.json"
+  # 相对路径基于 config.yaml 所在目录解析
+  downloadDir: "tools/download"
+  refreshSeconds: 300

@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	fyneTest "fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 	"github.com/liqixin/deploy-agent/internal/appservice"
 	"github.com/liqixin/deploy-agent/internal/gui/apiclient"
@@ -79,8 +81,11 @@ func TestPreDownloadOptionsDisabledReturnsEmptyOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("preDownloadOptions returned error: %v", err)
 	}
+	if len(opts.Args) != 0 {
+		t.Fatalf("Args = %#v, want empty", opts.Args)
+	}
 	if opts.PreDownload.Enabled {
-		t.Fatalf("PreDownload.Enabled = true, want false")
+		t.Fatal("PreDownload.Enabled = true, want false")
 	}
 }
 
@@ -108,19 +113,22 @@ func TestPreDownloadOptionsRequiresProjectAndArtifact(t *testing.T) {
 	}
 }
 
-func TestPreDownloadOptionsBuildsEnabledRequest(t *testing.T) {
+func TestPreDownloadOptionsBuildsDownloadAndTargetArgsRequest(t *testing.T) {
 	opts, err := preDownloadOptions(true, " ProjectA ", " app.zip ")
 	if err != nil {
 		t.Fatalf("preDownloadOptions returned error: %v", err)
+	}
+	if strings.Join(opts.Args, ",") != "ProjectA,app.zip" {
+		t.Fatalf("Args = %#v, want ProjectA and app.zip", opts.Args)
 	}
 	if !opts.PreDownload.Enabled {
 		t.Fatal("PreDownload.Enabled = false, want true")
 	}
 	if opts.PreDownload.Project != "ProjectA" {
-		t.Fatalf("Project = %q, want ProjectA", opts.PreDownload.Project)
+		t.Fatalf("PreDownload.Project = %q, want ProjectA", opts.PreDownload.Project)
 	}
 	if opts.PreDownload.Artifact != "app.zip" {
-		t.Fatalf("Artifact = %q, want app.zip", opts.PreDownload.Artifact)
+		t.Fatalf("PreDownload.Artifact = %q, want app.zip", opts.PreDownload.Artifact)
 	}
 }
 
@@ -244,5 +252,76 @@ func TestClientConfigForUnknownModeReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), unknownMode) {
 		t.Fatalf("error = %q, want message containing %q", err.Error(), unknownMode)
+	}
+}
+
+func TestDownloadCenterSelectsLatestAndListsResources(t *testing.T) {
+	testApp := fyneTest.NewApp()
+	defer testApp.Quit()
+	state := &guiState{client: apiclient.New("http://127.0.0.1:1", "admin", "password")}
+	state.buildDownloadCenter()
+	state.applyDownloadManifest(&apiclient.ReleaseManifest{
+		LatestVersion: "2026.08.19",
+		GeneratedAt:   time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC),
+		Releases: []apiclient.Release{
+			{Version: "2026.08.18", PublishedAt: time.Date(2026, 8, 18, 9, 0, 0, 0, time.UTC), Resources: []apiclient.Resource{{ID: "old", Kind: "component", Name: "old.zip", Size: 2}}},
+			{Version: "2026.08.19", PublishedAt: time.Date(2026, 8, 19, 9, 0, 0, 0, time.UTC), Resources: []apiclient.Resource{
+				{ID: "api", Kind: "component", Name: "api.zip", Size: 4},
+				{ID: "bundle", Kind: "bundle", Name: "bundle.zip", Size: 8},
+			}},
+		},
+	})
+	if state.downloadVersion.Selected != "2026.08.19" {
+		t.Fatalf("selected version = %q, want latest", state.downloadVersion.Selected)
+	}
+	if len(state.downloadVersion.Options) != 2 || state.downloadVersion.Options[0] != "2026.08.19" {
+		t.Fatalf("version options = %#v, want newest first", state.downloadVersion.Options)
+	}
+	if len(state.downloadItems) != 2 || state.downloadItems[0].Kind != "bundle" {
+		t.Fatalf("resources = %#v, want bundle first", state.downloadItems)
+	}
+	if state.downloadLatest.Text != "最新" || state.downloadEmpty.Text != "" {
+		t.Fatalf("latest marker/empty text = %q/%q", state.downloadLatest.Text, state.downloadEmpty.Text)
+	}
+}
+
+func TestDownloadCenterProgressCancelAndRetryStates(t *testing.T) {
+	testApp := fyneTest.NewApp()
+	defer testApp.Quit()
+	state := &guiState{
+		client:               apiclient.New("http://127.0.0.1:1", "admin", "password"),
+		downloadLastVersion:  "2026.08.19",
+		downloadLastResource: "api",
+	}
+	state.buildDownloadCenter()
+	state.applyDownloadInfo(apiclient.DownloadInfo{
+		TaskID: "task-1", State: "downloading", Version: "2026.08.19", ResourceID: "api",
+		Name: "api.zip", Phase: "download", BytesDone: 512, TotalBytes: 1000, Percent: 51.2, SpeedBytesPerSecond: 2048,
+		Destination: `D:\tools\download\api.zip`,
+	})
+	if state.downloadProgress.Value < 0.511 || state.downloadProgress.Value > 0.513 {
+		t.Fatalf("progress value = %v, want 0.512", state.downloadProgress.Value)
+	}
+	if state.downloadCancel.Disabled() {
+		t.Fatal("cancel button disabled during active task")
+	}
+	if !strings.Contains(state.downloadProgressText.Text, "51.20%") || !strings.Contains(state.downloadDestination.Text, "服务端路径") {
+		t.Fatalf("progress/path labels = %q / %q", state.downloadProgressText.Text, state.downloadDestination.Text)
+	}
+
+	state.applyDownloadInfo(apiclient.DownloadInfo{
+		TaskID: "task-1", State: "failed", Version: "2026.08.19", ResourceID: "api", Name: "api.zip",
+		Error: "SHA-256 mismatch",
+	})
+	if !state.downloadCancel.Disabled() || state.downloadRetry.Disabled() {
+		t.Fatalf("cancel/retry buttons after failure = %v/%v", state.downloadCancel.Disabled(), state.downloadRetry.Disabled())
+	}
+	if !strings.Contains(state.downloadStatus.Text, "重试") || !strings.Contains(state.downloadError.Text, "SHA-256") {
+		t.Fatalf("failure labels = %q / %q", state.downloadStatus.Text, state.downloadError.Text)
+	}
+
+	state.applyDownloadInfo(apiclient.DownloadInfo{TaskID: "task-1", State: "cancelled", Version: "2026.08.19", ResourceID: "api"})
+	if !strings.Contains(state.downloadStatus.Text, "取消") {
+		t.Fatalf("cancelled status = %q", state.downloadStatus.Text)
 	}
 }

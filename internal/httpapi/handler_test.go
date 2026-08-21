@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,8 +15,10 @@ import (
 	"time"
 
 	"github.com/liqixin/deploy-agent/internal/auth"
+	"github.com/liqixin/deploy-agent/internal/downloadtask"
 	"github.com/liqixin/deploy-agent/internal/executor"
 	"github.com/liqixin/deploy-agent/internal/registry"
+	"github.com/liqixin/deploy-agent/internal/releasecatalog"
 )
 
 type testServer struct {
@@ -512,6 +516,27 @@ func TestRunStreamReturnsOutputAndFinalMessages(t *testing.T) {
 	}
 }
 
+func TestRunStreamPassesArgsToSelectedScript(t *testing.T) {
+	server := makeServer(t, map[string]string{"deploy.bat": "@echo off\r\necho project=%~1\r\necho artifact=%~2\r\n"})
+	req := httptest.NewRequest(http.MethodPost, "/run/stream", bytes.NewBufferString(`{"script":"deploy.bat","args":["ProjectA","app.zip"]}`))
+	req.Header.Set("Authorization", authHeader())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "project=ProjectA") {
+		t.Fatalf("body = %s, want project argument output", body)
+	}
+	if !strings.Contains(body, "artifact=app.zip") {
+		t.Fatalf("body = %s, want artifact argument output", body)
+	}
+}
+
 func TestRunStreamNoOutputStillReturnsFinal(t *testing.T) {
 	server := makeServer(t, map[string]string{"quiet.bat": "@echo off\r\nexit /b 0\r\n"})
 	rec := httptest.NewRecorder()
@@ -661,6 +686,214 @@ func TestStatusWriterFlushPassesThrough(t *testing.T) {
 
 	if !fw.flushed {
 		t.Fatal("flush did not call underlying flusher")
+	}
+}
+
+type fakeReleaseCatalog struct {
+	manifest     *releasecatalog.Manifest
+	manifestErr  error
+	refreshErr   error
+	refreshCalls int
+}
+
+func (f *fakeReleaseCatalog) Manifest() (*releasecatalog.Manifest, error) {
+	return f.manifest, f.manifestErr
+}
+
+func (f *fakeReleaseCatalog) Refresh(context.Context) error {
+	f.refreshCalls++
+	return f.refreshErr
+}
+
+type fakeDownloadService struct {
+	startVersion  string
+	startResource string
+	startInfo     downloadtask.Info
+	startErr      error
+	getInfo       downloadtask.Info
+	getErr        error
+	cancelID      string
+	cancelErr     error
+}
+
+func (f *fakeDownloadService) Start(version, resourceID string) (downloadtask.Info, error) {
+	f.startVersion = version
+	f.startResource = resourceID
+	return f.startInfo, f.startErr
+}
+
+func (f *fakeDownloadService) Get(string) (downloadtask.Info, error) {
+	return f.getInfo, f.getErr
+}
+
+func (f *fakeDownloadService) Cancel(id string) error {
+	f.cancelID = id
+	return f.cancelErr
+}
+
+func makeFeatureHandler(t *testing.T, releases ReleaseCatalog, downloads DownloadService) http.Handler {
+	t.Helper()
+	reg, err := registry.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := New(executor.New(reg, time.Second), releases, downloads)
+	return api.Routes(func(h http.Handler) http.Handler {
+		return auth.BasicAuth("admin", "change-me-please", h)
+	})
+}
+
+func TestReleaseAndDownloadEndpointsRequireAuth(t *testing.T) {
+	handler := makeFeatureHandler(t, &fakeReleaseCatalog{}, &fakeDownloadService{})
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/releases"},
+		{http.MethodPost, "/releases/refresh"},
+		{http.MethodPost, "/downloads"},
+		{http.MethodGet, "/downloads/task-id"},
+		{http.MethodPost, "/downloads/task-id/cancel"},
+	} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s %s returned %d, want 401", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+func TestReleasesHideSignedURLsAndRefreshRemotely(t *testing.T) {
+	catalog := &fakeReleaseCatalog{manifest: &releasecatalog.Manifest{
+		SchemaVersion: 1,
+		Product:       "deploy-agent",
+		LatestVersion: "2026.08.19",
+		GeneratedAt:   time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC),
+		Releases: []releasecatalog.Release{{
+			Version:     "2026.08.19",
+			PublishedAt: time.Date(2026, 8, 19, 9, 30, 0, 0, time.UTC),
+			Resources: []releasecatalog.Resource{{
+				ID: "api", Kind: "component", Name: "api.zip", URL: "https://signed.example/secret", Size: 12, SHA256: strings.Repeat("a", 64),
+			}},
+		}},
+	}}
+	handler := makeFeatureHandler(t, catalog, &fakeDownloadService{})
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/releases"},
+		{http.MethodPost, "/releases/refresh"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Authorization", authHeader())
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s %s returned %d: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "signed.example") || strings.Contains(rec.Body.String(), `"url"`) {
+			t.Fatalf("signed URL leaked in response: %s", rec.Body.String())
+		}
+	}
+	if catalog.refreshCalls != 1 {
+		t.Fatalf("refresh calls = %d, want 1", catalog.refreshCalls)
+	}
+}
+
+func TestReleaseRefreshFailureKeepsCachedManifestAvailable(t *testing.T) {
+	catalog := &fakeReleaseCatalog{
+		manifest:   &releasecatalog.Manifest{LatestVersion: "1.0.0"},
+		refreshErr: errors.New("upstream unavailable"),
+	}
+	handler := makeFeatureHandler(t, catalog, nil)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/releases/refresh", nil)
+	refreshReq.Header.Set("Authorization", authHeader())
+	refreshRec := httptest.NewRecorder()
+	handler.ServeHTTP(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusBadGateway {
+		t.Fatalf("refresh returned %d: %s", refreshRec.Code, refreshRec.Body.String())
+	}
+	getReq := httptest.NewRequest(http.MethodGet, "/releases", nil)
+	getReq.Header.Set("Authorization", authHeader())
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), `"latestVersion": "1.0.0"`) {
+		t.Fatalf("cached release response = %d: %s", getRec.Code, getRec.Body.String())
+	}
+}
+
+func TestDownloadEndpointLifecycleAndShape(t *testing.T) {
+	info := downloadtask.Info{
+		TaskID: "task-1", State: downloadtask.StateDownloading, Version: "2026.08.19", ResourceID: "api",
+		Phase: "download", BytesDone: 25, TotalBytes: 100, Percent: 25, SpeedBytesPerSecond: 500,
+		Destination: `D:\tools\download\2026.08.19\api.zip`,
+	}
+	downloads := &fakeDownloadService{startInfo: info, getInfo: info}
+	handler := makeFeatureHandler(t, &fakeReleaseCatalog{}, downloads)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/downloads", bytes.NewBufferString(`{"version":"2026.08.19","resourceId":"api"}`))
+	startReq.Header.Set("Authorization", authHeader())
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusAccepted {
+		t.Fatalf("start returned %d: %s", startRec.Code, startRec.Body.String())
+	}
+	if downloads.startVersion != "2026.08.19" || downloads.startResource != "api" {
+		t.Fatalf("start arguments = %q/%q", downloads.startVersion, downloads.startResource)
+	}
+	var got downloadtask.Info
+	if err := json.Unmarshal(startRec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.TaskID != "task-1" || got.State != downloadtask.StateDownloading || got.BytesDone != 25 || got.Destination == "" {
+		t.Fatalf("unexpected start response: %#v", got)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/downloads/task-1", nil)
+	statusReq.Header.Set("Authorization", authHeader())
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status returned %d: %s", statusRec.Code, statusRec.Body.String())
+	}
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/downloads/task-1/cancel", nil)
+	cancelReq.Header.Set("Authorization", authHeader())
+	cancelRec := httptest.NewRecorder()
+	handler.ServeHTTP(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusAccepted || downloads.cancelID != "task-1" {
+		t.Fatalf("cancel returned %d id=%q body=%s", cancelRec.Code, downloads.cancelID, cancelRec.Body.String())
+	}
+}
+
+func TestDownloadConflictAndUnavailableStatusCodes(t *testing.T) {
+	downloads := &fakeDownloadService{startErr: downloadtask.ErrConflict, getErr: downloadtask.ErrNotFound}
+	handler := makeFeatureHandler(t, nil, downloads)
+
+	startReq := httptest.NewRequest(http.MethodPost, "/downloads", bytes.NewBufferString(`{"version":"1.0.0","resourceId":"api"}`))
+	startReq.Header.Set("Authorization", authHeader())
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusConflict {
+		t.Fatalf("conflict returned %d: %s", startRec.Code, startRec.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/downloads/missing", nil)
+	getReq.Header.Set("Authorization", authHeader())
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusNotFound {
+		t.Fatalf("missing task returned %d: %s", getRec.Code, getRec.Body.String())
+	}
+
+	releasesReq := httptest.NewRequest(http.MethodGet, "/releases", nil)
+	releasesReq.Header.Set("Authorization", authHeader())
+	releasesRec := httptest.NewRecorder()
+	handler.ServeHTTP(releasesRec, releasesReq)
+	if releasesRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled releases returned %d: %s", releasesRec.Code, releasesRec.Body.String())
 	}
 }
 

@@ -227,3 +227,87 @@ func TestResolvePreRunDownloadScriptUsesConfigDirectory(t *testing.T) {
 		t.Fatalf("path = %q, want %q", got, want)
 	}
 }
+
+func TestLoadDefaultsReleaseDownloadSettings(t *testing.T) {
+	path := writeConfig(t, `
+auth:
+  username: admin
+  password: change-me-please
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Release.Enabled {
+		t.Fatal("release should default to disabled")
+	}
+	if cfg.Release.DownloadDir != filepath.Join("tools", "download") || cfg.Release.RefreshSeconds != 300 {
+		t.Fatalf("unexpected release defaults: %#v", cfg.Release)
+	}
+}
+
+func TestLoadParsesReleaseSettings(t *testing.T) {
+	path := writeConfig(t, `
+auth:
+  username: admin
+  password: change-me-please
+release:
+  enabled: true
+  manifestURL: https://release.example.com/deploy-agent/manifest.json
+  downloadDir: artifacts
+  refreshSeconds: 60
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Release.Enabled || cfg.Release.ManifestURL == "" || cfg.Release.DownloadDir != "artifacts" || cfg.Release.RefreshSeconds != 60 {
+		t.Fatalf("unexpected release config: %#v", cfg.Release)
+	}
+}
+
+func TestLoadTreatsEmptyReleaseManifestURLAsDisabled(t *testing.T) {
+	path := writeConfig(t, `
+auth:
+  username: admin
+  password: change-me-please
+release:
+  enabled: true
+  manifestURL: ""
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("empty manifest URL should leave the optional feature unavailable: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidReleaseSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"non HTTPS URL", "manifestURL: http://release.example.com/manifest.json\n  refreshSeconds: 60", "valid HTTPS URL"},
+		{"zero refresh", "manifestURL: https://release.example.com/manifest.json\n  refreshSeconds: 0", "refreshSeconds must be > 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, "auth:\n  username: admin\n  password: change-me-please\nrelease:\n  enabled: true\n  "+tc.body+"\n")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveReleaseDownloadDirUsesConfigDirectory(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &Config{Release: ReleaseConfig{DownloadDir: filepath.Join("tools", "download")}}
+	got, err := cfg.ResolveReleaseDownloadDir(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "tools", "download")
+	if got != want {
+		t.Fatalf("download dir = %q, want %q", got, want)
+	}
+}

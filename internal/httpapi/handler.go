@@ -6,17 +6,58 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/liqixin/deploy-agent/internal/downloadtask"
 	"github.com/liqixin/deploy-agent/internal/executor"
+	"github.com/liqixin/deploy-agent/internal/releasecatalog"
 )
 
 type Server struct {
-	exec *executor.Executor
+	exec      *executor.Executor
+	releases  ReleaseCatalog
+	downloads DownloadService
 }
 
-func New(exec *executor.Executor) *Server {
-	return &Server{exec: exec}
+// ReleaseCatalog and DownloadService are deliberately small HTTP-facing
+// contracts; concrete catalog/task implementations are injected by main.
+type ReleaseCatalog interface {
+	Manifest() (*releasecatalog.Manifest, error)
+	Refresh(context.Context) error
+}
+type DownloadService interface {
+	Start(version, resourceID string) (downloadtask.Info, error)
+	Get(taskID string) (downloadtask.Info, error)
+	Cancel(taskID string) error
+}
+type DownloadRequest struct {
+	Version    string `json:"version"`
+	ResourceID string `json:"resourceId"`
+}
+
+// DownloadInfo is kept as an HTTP-package alias so callers that used the
+// earlier handler DTO continue to compile while receiving the new fields.
+type DownloadInfo = downloadtask.Info
+
+var (
+	ErrReleaseUnavailable  = errors.New("release service unavailable")
+	ErrDownloadUnavailable = errors.New("download service unavailable")
+	ErrDownloadNotFound    = downloadtask.ErrNotFound
+	ErrDownloadConflict    = downloadtask.ErrConflict
+)
+
+func New(exec *executor.Executor, services ...any) *Server {
+	s := &Server{exec: exec}
+	for _, v := range services {
+		if x, ok := v.(ReleaseCatalog); ok {
+			s.releases = x
+		}
+		if x, ok := v.(DownloadService); ok {
+			s.downloads = x
+		}
+	}
+	return s
 }
 
 func (s *Server) Routes(authWrap func(http.Handler) http.Handler) http.Handler {
@@ -25,6 +66,10 @@ func (s *Server) Routes(authWrap func(http.Handler) http.Handler) http.Handler {
 	mux.Handle("/scripts", authWrap(http.HandlerFunc(s.handleScripts)))
 	mux.Handle("/run", authWrap(http.HandlerFunc(s.handleRun)))
 	mux.Handle("/run/stream", authWrap(http.HandlerFunc(s.handleRunStream)))
+	mux.Handle("/releases", authWrap(http.HandlerFunc(s.handleReleases)))
+	mux.Handle("/releases/refresh", authWrap(http.HandlerFunc(s.handleReleaseRefresh)))
+	mux.Handle("/downloads", authWrap(http.HandlerFunc(s.handleDownloads)))
+	mux.Handle("/downloads/", authWrap(http.HandlerFunc(s.handleDownloadPath)))
 	return accessLog(mux)
 }
 
@@ -40,8 +85,155 @@ func (s *Server) handleScripts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"scripts": s.exec.List()})
 }
 
+func (s *Server) handleReleases(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.releases == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": ErrReleaseUnavailable.Error()})
+		return
+	}
+	v, err := s.releases.Manifest()
+	if err != nil {
+		message := err.Error()
+		if errors.Is(err, releasecatalog.ErrUnavailable) {
+			message = ErrReleaseUnavailable.Error()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": message})
+		return
+	}
+	if v == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": ErrReleaseUnavailable.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, publicManifest(v))
+}
+func (s *Server) handleReleaseRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.releases == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": ErrReleaseUnavailable.Error()})
+		return
+	}
+	defer r.Body.Close()
+	if err := s.releases.Refresh(r.Context()); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	v, err := s.releases.Manifest()
+	if err != nil {
+		message := err.Error()
+		if errors.Is(err, releasecatalog.ErrUnavailable) {
+			message = ErrReleaseUnavailable.Error()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": message})
+		return
+	}
+	if v == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": ErrReleaseUnavailable.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, publicManifest(v))
+}
+func (s *Server) handleDownloads(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.downloads == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": ErrDownloadUnavailable.Error()})
+		return
+	}
+	defer r.Body.Close()
+	var req DownloadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if strings.TrimSpace(req.Version) == "" || strings.TrimSpace(req.ResourceID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "version and resourceId are required"})
+		return
+	}
+	if req.Version == "." || req.Version == ".." || strings.ContainsAny(req.Version, `/\\:`) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid version"})
+		return
+	}
+	v, err := s.downloads.Start(req.Version, req.ResourceID)
+	if err != nil {
+		s.writeDownloadError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, v)
+}
+func (s *Server) handleDownloadPath(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/downloads/"), "/")
+	parts := strings.Split(path, "/")
+	if path == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "cancel") {
+		http.NotFound(w, r)
+		return
+	}
+	id := parts[0]
+	if s.downloads == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": ErrDownloadUnavailable.Error()})
+		return
+	}
+	switch {
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		v, err := s.downloads.Get(id)
+		if err != nil {
+			s.writeDownloadError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, v)
+	case len(parts) == 2 && r.Method == http.MethodPost:
+		if err := s.downloads.Cancel(id); err != nil {
+			s.writeDownloadError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "cancellation-requested", "taskId": id})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+func (s *Server) writeDownloadError(w http.ResponseWriter, err error) {
+	code := http.StatusInternalServerError
+	if errors.Is(err, downloadtask.ErrInvalidRequest) {
+		code = http.StatusBadRequest
+	}
+	if errors.Is(err, downloadtask.ErrNotFound) || errors.Is(err, releasecatalog.ErrReleaseNotFound) || errors.Is(err, releasecatalog.ErrResourceNotFound) {
+		code = http.StatusNotFound
+	}
+	if errors.Is(err, downloadtask.ErrConflict) {
+		code = http.StatusConflict
+	}
+	if errors.Is(err, ErrDownloadUnavailable) || errors.Is(err, releasecatalog.ErrUnavailable) {
+		code = http.StatusServiceUnavailable
+	}
+	writeJSON(w, code, map[string]string{"error": err.Error()})
+}
+
+func publicManifest(manifest *releasecatalog.Manifest) *releasecatalog.Manifest {
+	if manifest == nil {
+		return nil
+	}
+	result := *manifest
+	result.Releases = make([]releasecatalog.Release, len(manifest.Releases))
+	for i := range manifest.Releases {
+		result.Releases[i] = manifest.Releases[i]
+		result.Releases[i].Resources = append([]releasecatalog.Resource(nil), manifest.Releases[i].Resources...)
+		for j := range result.Releases[i].Resources {
+			result.Releases[i].Resources[j].URL = ""
+		}
+	}
+	return &result
+}
+
 type runRequest struct {
 	Script      string              `json:"script"`
+	Args        []string            `json:"args,omitempty"`
 	PreDownload *preDownloadRequest `json:"preDownload,omitempty"`
 }
 
@@ -87,16 +279,16 @@ type streamRunResult struct {
 }
 
 func runOptionsFromRequest(req runRequest) executor.RunOptions {
+	opts := executor.RunOptions{Args: req.Args}
 	if req.PreDownload == nil {
-		return executor.RunOptions{}
+		return opts
 	}
-	return executor.RunOptions{
-		PreDownload: executor.PreDownloadRequest{
-			Enabled:  req.PreDownload.Enabled,
-			Project:  req.PreDownload.Project,
-			Artifact: req.PreDownload.Artifact,
-		},
+	opts.PreDownload = executor.PreDownloadRequest{
+		Enabled:  req.PreDownload.Enabled,
+		Project:  req.PreDownload.Project,
+		Artifact: req.PreDownload.Artifact,
 	}
+	return opts
 }
 
 func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
@@ -113,6 +305,9 @@ func (s *Server) handleRun(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, executor.ErrInvalidScriptName):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
+			return
+		case errors.Is(err, executor.ErrInvalidScriptArg):
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
 			return
 		case errors.Is(err, executor.ErrInvalidPreDownloadRequest):
@@ -255,6 +450,9 @@ func writeStreamOutputs(w http.ResponseWriter, enc *json.Encoder, outputs <-chan
 func writePreflightStreamError(w http.ResponseWriter, result executor.Result, err error) bool {
 	switch {
 	case errors.Is(err, executor.ErrInvalidScriptName):
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
+		return true
+	case errors.Is(err, executor.ErrInvalidScriptArg):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": executor.StableError(err)})
 		return true
 	case errors.Is(err, executor.ErrInvalidPreDownloadRequest):

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ type Config struct {
 	Auth     AuthConfig     `yaml:"auth"`
 	Runner   RunnerConfig   `yaml:"runner"`
 	PreRun   PreRunConfig   `yaml:"preRun"`
+	Release  ReleaseConfig  `yaml:"release"`
 }
 
 type ServerConfig struct {
@@ -60,6 +62,13 @@ type PreRunDownloadConfig struct {
 	TimeoutSeconds int    `yaml:"timeoutSeconds"`
 }
 
+type ReleaseConfig struct {
+	Enabled        bool   `yaml:"enabled"`
+	ManifestURL    string `yaml:"manifestURL"`
+	DownloadDir    string `yaml:"downloadDir"`
+	RefreshSeconds int    `yaml:"refreshSeconds"`
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -92,6 +101,7 @@ func defaults() *Config {
 		PreRun: PreRunConfig{
 			Download: PreRunDownloadConfig{TimeoutSeconds: 300},
 		},
+		Release: ReleaseConfig{DownloadDir: filepath.Join("tools", "download"), RefreshSeconds: 300},
 	}
 }
 
@@ -127,6 +137,15 @@ func (c *Config) validate() error {
 	if c.PreRun.Download.TimeoutSeconds <= 0 {
 		return fmt.Errorf("preRun.download.timeoutSeconds must be > 0")
 	}
+	if c.Release.Enabled && strings.TrimSpace(c.Release.ManifestURL) != "" {
+		u, err := url.Parse(strings.TrimSpace(c.Release.ManifestURL))
+		if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
+			return fmt.Errorf("release.manifestURL must be a valid HTTPS URL")
+		}
+		if c.Release.RefreshSeconds <= 0 {
+			return fmt.Errorf("release.refreshSeconds must be > 0")
+		}
+	}
 	return nil
 }
 
@@ -153,4 +172,17 @@ func (c *Config) ResolvePreRunDownloadScript(configPath string) (string, error) 
 	}
 	base := filepath.Dir(configPath)
 	return filepath.Abs(filepath.Join(base, script))
+}
+
+// ResolveReleaseDownloadDir returns the release download directory, resolved
+// relative to the config file directory when configured as a relative path.
+func (c *Config) ResolveReleaseDownloadDir(configPath string) (string, error) {
+	dir := strings.TrimSpace(c.Release.DownloadDir)
+	if dir == "" {
+		dir = filepath.Join("tools", "download")
+	}
+	if filepath.IsAbs(dir) {
+		return filepath.Clean(dir), nil
+	}
+	return filepath.Abs(filepath.Join(filepath.Dir(configPath), dir))
 }

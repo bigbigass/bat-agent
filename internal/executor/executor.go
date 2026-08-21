@@ -16,6 +16,7 @@ var (
 	ErrScriptBusy        = errors.New("script is already running")
 	ErrRunnerStart       = errors.New("runner start failed")
 	ErrScriptTimedOut    = errors.New("script timed out")
+	ErrInvalidScriptArg  = errors.New("invalid script argument")
 
 	ErrPreDownloadNotConfigured  = errors.New("pre-run download is not configured")
 	ErrInvalidPreDownloadRequest = errors.New("invalid pre-run download request")
@@ -30,6 +31,7 @@ type Executor struct {
 }
 
 type RunOptions struct {
+	Args        []string
 	PreDownload PreDownloadRequest
 }
 
@@ -106,6 +108,10 @@ func (e *Executor) RunStreamWithOptions(ctx context.Context, script string, opts
 	if preDownload.Enabled && strings.TrimSpace(e.preDownload.ScriptPath) == "" {
 		return Result{Script: entry.Name, ExitCode: -1}, ErrPreDownloadNotConfigured
 	}
+	args, err := validateScriptArgs(opts.Args)
+	if err != nil {
+		return Result{Script: entry.Name, ExitCode: -1}, err
+	}
 
 	if !entry.TryLock() {
 		return Result{Script: entry.Name, ExitCode: -1}, ErrScriptBusy
@@ -120,7 +126,7 @@ func (e *Executor) RunStreamWithOptions(ctx context.Context, script string, opts
 		}
 	}
 
-	res, err := runner.RunStream(ctx, entry.Path, e.timeout, adaptOutputFunc(onOutput))
+	res, err := runner.RunStreamWithArgs(ctx, entry.Path, args, e.timeout, adaptOutputFunc(onOutput))
 	out := resultFromRunner(entry.Name, res)
 	if preDownload.Enabled {
 		out = mergeResults(entry.Name, preResult, out)
@@ -130,6 +136,20 @@ func (e *Executor) RunStreamWithOptions(ctx context.Context, script string, opts
 	}
 	if err != nil {
 		return out, runnerStartError{err: err}
+	}
+	return out, nil
+}
+
+func validateScriptArgs(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	out := make([]string, len(args))
+	for i, arg := range args {
+		if strings.ContainsAny(arg, "\"\r\n") {
+			return nil, ErrInvalidScriptArg
+		}
+		out[i] = arg
 	}
 	return out, nil
 }
@@ -232,6 +252,8 @@ func StableError(err error) string {
 		return "runner start failed"
 	case errors.Is(err, ErrScriptTimedOut):
 		return "script timed out"
+	case errors.Is(err, ErrInvalidScriptArg):
+		return "invalid script argument"
 	case errors.Is(err, ErrPreDownloadNotConfigured):
 		return "pre-run download is not configured"
 	case errors.Is(err, ErrInvalidPreDownloadRequest):
